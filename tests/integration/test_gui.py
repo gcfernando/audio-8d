@@ -201,8 +201,8 @@ def test_style_choice_reaches_the_real_conversion_of_each_song(
 
     items = {item.source: item for item in app.run_items}
     assert items[first].config is None  # the default (Studio, saved as FLAC)
-    assert items[second].config.path == "arc"  # Voice's own movement…
-    assert items[second].config.output_format == "flac"  # …with the shared file
+    assert items[second].config.path == "arc"  # Voice's own movement
+    assert items[second].config.output_format == "flac"  # but the shared FLAC file
     assert (tmp_path / "out" / "first (8D).flac").is_file()
     assert (tmp_path / "out" / "second (8D).flac").is_file()
     assert {row[3] for row in app.run_results.values()} == {"done"}
@@ -489,7 +489,9 @@ def test_three_hundred_songs_stay_quick_and_every_one_is_reported(
     slowest = 0.0
     app.add_paths([folder])
     end = time.time() + 120
-    while any(t.state == "reading" for t in app.library.tracks) and time.time() < end:
+    while (
+        app.scans_waiting or any(t.state == "reading" for t in app.library.tracks)
+    ) and time.time() < end:
         started = time.perf_counter()
         app.update()
         slowest = max(slowest, time.perf_counter() - started)

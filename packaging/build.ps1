@@ -1,6 +1,6 @@
 # Developed by ::> Gehan Fernando
 
-# Builds the Windows package bin\Audio8D-<version>-windows-x86_64.zip (see build_release.py)
+# Builds bin\Audio8D-<version>-windows-x86_64.zip through build_release.py
 param([switch]$Zip, [switch]$SkipCheck)
 
 $ErrorActionPreference = "Stop"

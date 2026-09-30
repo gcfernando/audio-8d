@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
+from .batch import MAX_JOBS
 from .core.errors import Audio8DError
 from .core.parsing import typed_loudness, typed_time_problem
 from .gui_fields import (
@@ -26,6 +27,7 @@ from .gui_fields import (
     MenuField,
     SliderField,
     SwitchField,
+    browse_button,
     trim_fields,
 )
 from .gui_model import (
@@ -45,8 +47,9 @@ from .gui_widgets import (
     DANGER,
     INK,
     SUCCESS,
-    SURFACE_ALT,
     TEXT_DIM,
+    TOOL_HEIGHT,
+    TOOL_WIDTH,
     WARNING,
     Badge,
     Card,
@@ -54,6 +57,7 @@ from .gui_widgets import (
     Section,
     button,
     entry,
+    font,
     hint,
 )
 from .library import UNREADABLE
@@ -61,13 +65,16 @@ from .library import UNREADABLE
 if TYPE_CHECKING:
     from .gui_app import Audio8DApp
 
+# How long typing in the folder box must pause before the folder is checked
+FOLDER_PAUSE_MS = 300
+
 # The two scopes of 'How the songs are saved' and 'More output options'
 SCOPES = {"All songs": "all", "One song": "one"}
 
 
 # What More output options holds; the scope is said before it
 MORE_WORDS = (
-    "Bitrate, exact loudness, peak limit, album picture, title and using only part "
+    "Bitrate, loudness precision, peak limit, album picture, title and using only part "
     "of the song. The recommended values suit almost everyone."
 )
 
@@ -75,6 +82,16 @@ MORE_WORDS = (
 def peak_words(ceiling: float) -> str:
     """A peak limit in decibels below the maximum, e.g. 0.84 -> '-1.5 dB'."""
     return f"{20 * math.log10(max(ceiling, 1e-6)):.1f} dB"
+
+
+# The lowest peak limit FFmpeg's limiter takes, as on the command line (-24 dB)
+LOWEST_CEILING = 0.0625
+
+
+def ceiling_for(decibels: float) -> float:
+    """The peak limit saved for a slider position in dB, e.g. -1.5 -> 0.84."""
+    # Two decimals keep the recommended limits exactly 0.84 and 0.89
+    return max(LOWEST_CEILING, round(10 ** (decibels / 20), 2))
 
 
 class MoreFileControls:  # pylint: disable=too-few-public-methods,too-many-instance-attributes
@@ -100,21 +117,23 @@ class MoreFileControls:  # pylint: disable=too-few-public-methods,too-many-insta
         )
         self.exact = SwitchField(
             body,
-            "Reach the loudness exactly",
+            "Get as close to the loudness as possible",
             "",
             lambda on: owner.set_values(exact_loudness=on),
             more="Off keeps every peak, so a very dynamic song may stay a little "
-            "below the chosen loudness. On lowers the very loudest moments a little "
-            "so every song lands exactly on it.",
+            "below the chosen loudness. On shaves the loudest peaks to get as close "
+            "to it as possible; very loud or punchy songs can still land a little "
+            "under it.",
         )
         self.ceiling = SliderField(
             body,
             "Peak limit",
             "Keeps the loudest moments from crackling. Recommended: -1.5 dB (MP3, "
             "M4A, Opus), -1.0 dB (FLAC, WAV).",
-            (0.5, 1.0, 50),
-            peak_words,
-            lambda v: owner.set_values(limiter_ceiling=round(v, 2)),
+            # Half-decibel steps from -24 dB, the lowest the command line allows
+            (-24.0, 0.0, 48),
+            lambda v: peak_words(ceiling_for(v)),
+            lambda v: owner.set_values(limiter_ceiling=ceiling_for(v)),
         )
         self.cover = SwitchField(
             body,
@@ -179,7 +198,8 @@ class MoreFileControls:  # pylint: disable=too-few-public-methods,too-many-insta
             "Off (recommended): a very dynamic song may end a little quieter "
             "instead of squeezing its loudest moments."
         )
-        self.ceiling.set(float(value("limiter_ceiling")))  # type: ignore[arg-type]
+        ceiling = float(value("limiter_ceiling"))  # type: ignore[arg-type]
+        self.ceiling.set(20 * math.log10(max(LOWEST_CEILING, ceiling)))
         can_cover = kind in {"mp3", "flac", "m4a"}
         self.cover.set(bool(value("keep_cover")) and can_cover)
         self.cover.enable(can_cover)
@@ -213,7 +233,7 @@ class RunControls:  # pylint: disable=too-few-public-methods
             "Songs at once",
             "More is faster on computers with many cores. A good value for this "
             "computer is already set.",
-            (1, 8, 7),
+            (1, MAX_JOBS, MAX_JOBS - 1),
             lambda v: f"{v:.0f}",
             lambda v: app.set_flag("jobs", int(round(v))),
         )
@@ -242,6 +262,8 @@ class OutputPage(Page):  # pylint: disable=too-many-instance-attributes
         )
         self.app = app
         self.wants_folder = False
+        # The folder box's pending check, while someone is still typing
+        self._folder_job: str | None = None
         # The song whose output is being edited; None edits the defaults for all
         self.song: Path | None = None
         # True while the other loudness levels are shown
@@ -291,9 +313,7 @@ class OutputPage(Page):  # pylint: disable=too-many-instance-attributes
         self.folder = entry(self.folder_row, "Choose a folder…", 300)
         self.folder.grid(row=0, column=0, sticky="ew", padx=(176, 10))
         self.folder.bind("<KeyRelease>", lambda _e: self._folder_typed())
-        button(
-            self.folder_row, "folder", "Browse…", self._browse, width=110, height=32
-        ).grid(row=0, column=1)
+        browse_button(self.folder_row, self._browse).grid(row=0, column=1)
         self.folder_note = hint(self.folder_row, "", margin=200)
         self.folder_note.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(176, 0))
         self.naming = ChoiceField(
@@ -354,14 +374,12 @@ class OutputPage(Page):  # pylint: disable=too-many-instance-attributes
 
     def _build_file(self) -> None:
         """Format, quality and loudness in plain words; the rest folded away."""
+        # Laid out like 'Your songs' on step 2: no tinted panels, rows at the left
         self.file_card = Card(self, "How the songs are saved")
         self.add(self.file_card, 3)
         body = self.file_card.body
-        scope = ctk.CTkFrame(body, fg_color=SURFACE_ALT, corner_radius=8)
-        scope.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        scope.grid_columnconfigure(0, weight=1)
         self.scope_mode = ChoiceField(
-            scope,
+            body,
             "Settings for",
             "",
             SCOPES,  # type: ignore[arg-type]
@@ -369,26 +387,25 @@ class OutputPage(Page):  # pylint: disable=too-many-instance-attributes
         )
         self.scope_mode.help.grid_remove()
         self.scope_mode.set("all")
-        self.scope_mode.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
-        self.scope_song = MenuField(
-            scope, "Song", "", {}, self._scope_picked, width=340
-        )
+        self.scope_mode.grid(row=0, column=0, sticky="ew", pady=3)
+        self.scope_song = MenuField(body, "Song", "", {}, self._scope_picked, width=340)
         self.scope_song.help.grid_remove()
-        self.scope_song.grid(row=1, column=0, sticky="ew", padx=4)
-        line = ctk.CTkFrame(scope, fg_color="transparent")
-        line.grid(row=2, column=0, sticky="ew", padx=(12, 10), pady=(6, 10))
+        self.scope_song.grid(row=1, column=0, sticky="ew", pady=3)
+        line = ctk.CTkFrame(body, fg_color="transparent")
+        line.grid(row=2, column=0, sticky="ew", pady=(10, 8))
         line.grid_columnconfigure(3, weight=1)
         self.scope_badge = Badge(line, "All songs", "neutral")
         self.scope_badge.grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.scope = hint(line, "", INK, margin=640)
+        self.scope.configure(font=font(12, "bold"))
         self.scope.grid(row=0, column=1, sticky="w")
         self.scope_reset = button(
             line,
             "clear",
             "Reset",
             self._reset_scope,
-            width=190,
-            height=30,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
         )
         self.scope_reset.grid(row=0, column=2, sticky="w", padx=(12, 0))
         self.format = MenuField(
@@ -439,7 +456,7 @@ class OutputPage(Page):  # pylint: disable=too-many-instance-attributes
                 self.more_loudness,
                 self.custom_loud,
             ),
-            start=1,
+            start=3,  # below the scope choice, the song and the scope line
         ):
             widget.grid(row=row, column=0, sticky="ew", pady=3)
         # Inside the same card, so the choice above plainly covers it too
@@ -449,8 +466,7 @@ class OutputPage(Page):  # pylint: disable=too-many-instance-attributes
             MORE_WORDS,
             build=self._fill_advanced,
         )
-        self.advanced.configure(fg_color=SURFACE_ALT)
-        self.advanced.grid(row=6, column=0, sticky="ew", pady=(14, 0))
+        self.advanced.grid(row=8, column=0, sticky="ew", pady=(14, 0))
 
     def warm_sections(self) -> list[Section]:
         """The folded parts worth drawing once in the background."""
@@ -704,7 +720,15 @@ class OutputPage(Page):  # pylint: disable=too-many-instance-attributes
             self._browse()
 
     def _folder_typed(self) -> None:
-        """The folder box was edited by hand."""
+        """The folder box was edited by hand: checked once typing pauses."""
+        # Checking a folder can be slow (a sleeping network drive), so not per key
+        if self._folder_job is not None:
+            self.after_cancel(self._folder_job)
+        self._folder_job = self.after(FOLDER_PAUSE_MS, self._folder_settled)
+
+    def _folder_settled(self) -> None:
+        """Typing in the folder box paused: use what it says now."""
+        self._folder_job = None
         self.app.set_destination(self.folder.get().strip(), refresh_only=True)
 
     def _browse(self) -> None:

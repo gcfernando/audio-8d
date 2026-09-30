@@ -51,6 +51,11 @@ def tap_spacing_samples(sample_rate: int) -> int:
     return max(1, round(MAX_ITD_SECONDS * sample_rate / (DELAY_TAPS - 1)))
 
 
+def widest_itd(sample_rate: int) -> float:
+    """The largest ear gap the delay taps really give at this rate, in seconds."""
+    return tap_spacing_samples(sample_rate) * (DELAY_TAPS - 1) / sample_rate
+
+
 def _db(value: float) -> float:
     """dB to a plain gain factor."""
     return 10.0 ** (value / 20.0)

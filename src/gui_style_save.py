@@ -57,7 +57,7 @@ def checked_style(
         + "\n".join(f"•  {note.text}" for note in warnings_)
         + "\n\nImprove and save follows the advice for you.",
         [
-            ("Go back", "no"),
+            ("Cancel", "no"),
             ("Save as it is", "as-is"),
             ("Improve and save", "improve"),
         ],

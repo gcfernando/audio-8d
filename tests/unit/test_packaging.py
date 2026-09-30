@@ -34,7 +34,9 @@ def test_the_project_folder_is_home_during_development() -> None:
         root / "vendor" / "ffmpeg" / locations.platform_tag(),
         root / "bin",
     )
-    assert locations.GUIDE_URL.endswith("/8D/README.md")
+    assert locations.GUIDE_URL == (
+        "https://github.com/gcfernando/audio-8d/blob/main/README.md"
+    )
 
 
 def test_the_windows_ffmpeg_is_kept_in_vendor_not_bin() -> None:

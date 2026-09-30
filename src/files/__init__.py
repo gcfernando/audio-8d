@@ -5,6 +5,7 @@ from .atomic import commit_output, create_temporary_output
 from .discover import AUDIO_EXTENSIONS, find_songs, is_own_output
 from .paths import (
     NAME_STYLES,
+    claim_outputs,
     default_output_for,
     format_for_extension,
     output_name,
@@ -18,6 +19,7 @@ from .trash import describe_removal, removal_summary, remove_original
 __all__ = [
     "AUDIO_EXTENSIONS",
     "NAME_STYLES",
+    "claim_outputs",
     "commit_output",
     "create_temporary_output",
     "default_output_for",

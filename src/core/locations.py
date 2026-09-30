@@ -52,7 +52,7 @@ def tools_dir() -> Path:
 
 
 # The one and only guide; 'Open the full guide' always opens it in the browser
-GUIDE_URL = "https://github.com/gcfernando/python_codes/blob/main/8D/README.md"
+GUIDE_URL = "https://github.com/gcfernando/audio-8d/blob/main/README.md"
 
 
 def config_dir() -> Path:

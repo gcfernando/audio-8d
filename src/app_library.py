@@ -20,6 +20,8 @@ from .ffmpeg import (
     probe_audio,
 )
 from .files import AUDIO_EXTENSIONS, find_songs, is_own_output
+from .gui_dialogs import Dialog
+from .gui_model import is_custom
 from .library import (
     READY,
     UNREADABLE,
@@ -28,6 +30,11 @@ from .library import (
     forget_missing_styles,
 )
 from .recommend import BatchSuggestion
+
+# The status bar while added folders are looked through
+LOOKING = "Looking for songs…"
+# What was found at one added path: (path, is it a folder, its songs or None)
+Looked = tuple[Path, bool, list[tuple[Path, Path | None]] | None]
 
 
 class LibraryMixin(AppBase):
@@ -54,29 +61,55 @@ class LibraryMixin(AppBase):
     def add_paths(self, paths: list[Path]) -> None:
         """Add dropped or chosen files; folders add every song inside them."""
         if self.busy:
-            self.toast("Please wait until the conversion finishes", "error")
+            self.toast("Please wait until the songs are created", "error")
             return
+        recursive = self.settings.recursive
+        if not self.scans_waiting and not any(path.is_dir() for path in paths):
+            self._add_found(_look_inside(paths, recursive))
+            return
+        # A big or network folder takes a while to walk, so a helper thread does it
+        self.scans_waiting += 1
+        self.status_text.configure(text=LOOKING)
+        previous = self._scan_thread
+
+        def work() -> None:
+            try:
+                found = _look_inside(paths, recursive)
+            except Exception:  # pylint: disable=broad-exception-caught
+                # The window must still hear back, or it would wait forever
+                LOG.exception("Could not look for songs")
+                found = [(path, False, None) for path in paths]
+            # Songs are listed in the order they were added, however long each took
+            if previous is not None:
+                previous.join()
+            self.events.put(("songs-found", found))
+
+        self._scan_thread = threading.Thread(
+            target=work, name="find-songs", daemon=True
+        )
+        self._scan_thread.start()
+
+    def _songs_found(self, event: tuple) -> None:
+        """A helper thread finished looking inside the added folders."""
+        self.scans_waiting -= 1
+        if self.busy:
+            self.toast("Please wait until the songs are created", "error")
+            return
+        self._add_found(event[1])
+
+    def _add_found(self, looked: list[Looked]) -> None:
+        """Put the songs found on the list and explain anything that was left out."""
         added = []
         skipped = 0
-        for path in paths:
-            try:
-                if path.is_dir():
-                    found = [
-                        (song, path)
-                        for song in find_songs(path, recursive=self.settings.recursive)
-                    ]
-                    if not found:
-                        self.toast(f"No songs found in {path.name}", "error")
-                elif path.suffix.lower() in AUDIO_EXTENSIONS and not is_own_output(
-                    path
-                ):
-                    found = [(path, None)]
-                else:
-                    found, skipped = [], skipped + 1
-            except OSError as exc:
-                LOG.warning("Could not look inside %s: %s", path, exc)
+        for path, folder_added, found in looked:
+            if found is None:
                 self.toast(f"{path.name} can't be opened", "error")
                 continue
+            if not found:
+                if folder_added:
+                    self.toast(f"No songs found in {path.name}", "error")
+                else:
+                    skipped += 1
             for song, folder in found:
                 track = self.library.add(song, folder)
                 if track is not None:
@@ -86,6 +119,12 @@ class LibraryMixin(AppBase):
             self._read(added)
         elif skipped:
             self.toast("Those files aren't music (or were made by Audio8D)", "error")
+        if (
+            not added
+            and not self.scans_waiting
+            and self.status_text.cget("text") == LOOKING
+        ):
+            self.status_text.configure(text="Ready.")
         self.refresh_lists()
         self.sync_controls()
 
@@ -128,6 +167,29 @@ class LibraryMixin(AppBase):
 
         threading.Thread(target=work, name="read-songs", daemon=True).start()
 
+    def _song_read(self, event: tuple) -> None:
+        """One song's details were read (or it couldn't be read)."""
+        kind, generation, song, payload = event
+        track = self.library.get(song)
+        if generation != self.read_generation or track is None:
+            return
+        if kind == "probed":
+            track.info, track.state = payload, READY
+        else:
+            track.state, track.problem = UNREADABLE, payload
+        # Only the song's own rows now; counts and summaries once per tick
+        self.live("songs").update_track(track)
+        self.live("styles_step").update_track(track)
+        self._dirty = True
+        self._read_progress = True
+
+    def _reading_done(self, event: tuple) -> None:
+        """Every song of one batch has been read."""
+        if event[1] == self.read_generation and not self.busy:
+            self.status_text.configure(text="Ready.")
+            self.overall.set(0)
+        self._dirty = True
+
     def stop_reading(self) -> None:
         """Stop reading song details; songs not read yet stay on the list."""
         self.read_generation += 1
@@ -149,7 +211,7 @@ class LibraryMixin(AppBase):
     def remove_songs(self, songs: Sequence[Path]) -> None:
         """Take songs off the list (never while converting)."""
         if self.busy:
-            self.toast("Please wait until the conversion finishes", "error")
+            self.toast("Please wait until the songs are created", "error")
             return
         for song in songs:
             self.settings.song_styles.pop(song, None)
@@ -163,7 +225,30 @@ class LibraryMixin(AppBase):
         self.refresh_lists()
         self.sync_controls()
         if removed:
-            self.toast(f"Removed {len(removed)} song{'s' if len(removed) != 1 else ''}")
+            self.toast(f"Removed {self._songs_word(len(removed))}", "ok")
+
+    def ask_clear_songs(self) -> None:
+        """'Clear list': empty it, asking first when songs have their own settings."""
+        if self.busy or not self.library.tracks:
+            return
+        count = len(self.library.tracks)
+        own = sum(1 for t in self.library.tracks if is_custom(self.settings, t.song))
+        if own and not Dialog.confirm(
+            self,
+            "Clear the list?",
+            f"{self._songs_word(own)} on the list"
+            + (" have their own" if own != 1 else " has its own")
+            + " style or settings, which will be forgotten. Your files are not "
+            "touched.",
+            "Clear list",
+            icon="delete",
+        ):
+            return
+        # A conversion may have started while the question was open
+        if self.busy:
+            return
+        self.clear_songs()
+        self.toast(f"Cleared {self._songs_word(count)}", "ok")
 
     def clear_songs(self) -> None:
         """Empty the list."""
@@ -246,3 +331,30 @@ class LibraryMixin(AppBase):
         self.refresh_lists()
         self.sync_controls()
         return len(gone)
+
+
+def _look_inside(paths: Sequence[Path], recursive: bool) -> list[Looked]:
+    """(path, is it a folder, its songs as (song, folder)) per path; None: can't open.
+
+    Folders hold every song inside them, a song holds itself, and anything else
+    holds nothing.
+    """
+    looked: list[Looked] = []
+    for path in paths:
+        folder = False
+        try:
+            folder = path.is_dir()
+            if folder:
+                found: list[tuple[Path, Path | None]] = [
+                    (song, path) for song in find_songs(path, recursive=recursive)
+                ]
+            elif path.suffix.lower() in AUDIO_EXTENSIONS and not is_own_output(path):
+                found = [(path, None)]
+            else:
+                found = []
+        except (OSError, Audio8DError) as exc:
+            LOG.warning("Could not look inside %s: %s", path, exc)
+            looked.append((path, folder, None))
+            continue
+        looked.append((path, folder, found))
+    return looked

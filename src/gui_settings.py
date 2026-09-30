@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import customtkinter as ctk
 
 from . import __author__, __version__
+from .analysis import clear_stems_cache
 from .core.locations import GUIDE_URL, cache_dir, is_packaged, log_file
 from .core.preferences import SCALES, THEMES, preferences_file
 from .ffmpeg import ToolCheck, check_tool, locate
@@ -28,6 +29,7 @@ from .gui_dialogs import (
 from .gui_fields import (
     ChoiceField,
     SwitchField,
+    browse_button,
 )
 from .gui_health import AddonCard, HealthCard
 from .gui_widgets import (
@@ -41,6 +43,7 @@ from .gui_widgets import (
     Page,
     button,
     entry,
+    flow,
     font,
     hint,
     open_path,
@@ -79,15 +82,7 @@ class ToolRow(ctk.CTkFrame):
         self.path = entry(self, f"Found automatically ({name}{_EXE})", 420)
         self.path.grid(row=0, column=1, sticky="ew", padx=(6, 8))
         self.path.bind("<KeyRelease>", lambda _e: page.paths_edited())
-        button(
-            self,
-            "folder",
-            "Browse…",
-            self._browse,
-            width=110,
-            height=32,
-            tooltip=f"Choose {name}{_EXE}",
-        ).grid(row=0, column=2)
+        browse_button(self, self._browse, f"Choose {name}{_EXE}").grid(row=0, column=2)
         self.badge = Badge(self, "Not tested", "neutral")
         self.badge.grid(row=0, column=3, padx=(8, 0))
         self.source = hint(self, "", margin=140)
@@ -189,14 +184,14 @@ class SettingsPage(Page):
         self.rows["ffprobe"].grid(row=2, column=0, sticky="ew", pady=4)
         actions = ctk.CTkFrame(body, fg_color="transparent")
         actions.grid(row=3, column=0, sticky="w", pady=(10, 0))
-        button(
+        test = button(
             actions,
             "test",
             "Test",
             self.test,
             width=110,
             tooltip="Run both tools and show their versions",
-        ).pack(side="left", padx=(0, 6))
+        )
         self.save = button(
             actions,
             "save",
@@ -206,15 +201,15 @@ class SettingsPage(Page):
             width=160,
             tooltip="Test both tools, then use and remember them",
         )
-        self.save.pack(side="left", padx=6)
-        button(
+        automatic = button(
             actions,
             "replay",
             "Find automatically",
             self.use_automatic,
             width=190,
             tooltip="Forget the chosen paths and find the tools automatically again",
-        ).pack(side="left", padx=6)
+        )
+        flow(actions, (test, self.save, automatic))
         paths = self.app.preferences.tools()
         for name, path in zip(("ffmpeg", "ffprobe"), paths, strict=True):
             if path is not None:
@@ -244,8 +239,14 @@ class SettingsPage(Page):
                 row=0, column=0, sticky="ew"
             )
 
-    def test(self, then: Callable[[bool], None] | None = None) -> None:
-        """Run both tools on a helper thread and show what they say."""
+    def test(
+        self, then: Callable[[bool], None] | None = None, in_use: bool = False
+    ) -> None:
+        """Run both tools on a helper thread and show what they say.
+
+        in_use says the tested tools are the ones in use; a plain Test of typed,
+        unsaved paths only changes this card.
+        """
         paths = {
             name: (row.typed() if row.typed() is not None else locate(name).path)
             for name, row in self.rows.items()
@@ -255,7 +256,7 @@ class SettingsPage(Page):
 
         def work() -> None:
             results = {name: check_tool(name, path) for name, path in paths.items()}
-            self.app.events.put(("tools-tested", results, then))
+            self.app.events.put(("tools-tested", results, then, in_use))
 
         threading.Thread(target=work, name="tool-check", daemon=True).start()
 
@@ -279,6 +280,7 @@ class SettingsPage(Page):
             self.app.save_tool_paths(
                 self.rows["ffmpeg"].typed(), self.rows["ffprobe"].typed()
             )
+            self.app.tools_in_use(self.checks)
             self.paths_edited()
 
         self.test(done)
@@ -289,7 +291,7 @@ class SettingsPage(Page):
             row.path.delete(0, "end")
         self.app.save_tool_paths(None, None)
         self.paths_edited()
-        self.test()
+        self.test(in_use=True)
 
     # ------------------------------------------------------------ look
 
@@ -330,7 +332,7 @@ class SettingsPage(Page):
     # ------------------------------------------------------------ logs
 
     def _build_logs(self) -> None:
-        """Technical details, the log files, and remembered measurements."""
+        """Technical details, the log files, and remembered data."""
         card = Card(
             self,
             "Logs and saved data",
@@ -350,27 +352,31 @@ class SettingsPage(Page):
         self.verbose.grid(row=0, column=0, sticky="ew", pady=3)
         actions = ctk.CTkFrame(body, fg_color="transparent")
         actions.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        button(actions, "open", "Open log folder", self._open_logs, width=180).pack(
-            side="left", padx=(0, 8)
+        parts = [button(actions, "open", "Open log folder", self._open_logs, width=180)]
+        parts.append(
+            button(
+                actions,
+                "delete",
+                "Delete saved log files",
+                self._delete_logs,
+                width=230,
+                tooltip="Deletes the log files on disk after asking. The "
+                "log view is cleared with Clear log view on the Create step.",
+            )
         )
-        button(
-            actions,
-            "delete",
-            "Delete saved log files…",
-            self._delete_logs,
-            width=230,
-            tooltip="Deletes the log files on disk after asking. The "
-            "log view is cleared with Clear Logs on the Create step.",
-        ).pack(side="left", padx=8)
-        button(
-            actions,
-            "clear",
-            "Forget remembered measurements",
-            self._clear_cache,
-            width=290,
-            tooltip=f"Deletes the loudness cache in {cache_dir()}. It "
-            "is rebuilt automatically; nothing else is touched.",
-        ).pack(side="left", padx=8)
+        parts.append(
+            button(
+                actions,
+                "clear",
+                "Clear remembered data",
+                self._clear_cache,
+                width=290,
+                tooltip="Deletes the remembered loudness measurements and vocal "
+                f"splits in {cache_dir()} after asking. They are made again when "
+                "needed.",
+            )
+        )
+        flow(actions, parts)
 
     def reveal(self, part: str) -> None:
         """Scroll to a part of the page ('health', 'tools' or 'singer')."""
@@ -414,13 +420,44 @@ class SettingsPage(Page):
             self.app.delete_saved_logs()
 
     def _clear_cache(self) -> None:
-        """Delete the loudness cache file."""
-        try:
-            (cache_dir() / "loudness.json").unlink(missing_ok=True)
-        except OSError:
-            Toast(self.app, "Could not clear the remembered measurements", "error")
+        """Delete the remembered measurements and vocal splits, after asking."""
+        if self.app.busy:
+            Toast(self.app, "Please wait until the songs are created", "error")
             return
-        Toast(self.app, "Remembered measurements cleared", "ok")
+        answer = Dialog(
+            self.app,
+            "Clear the remembered data?",
+            "The remembered loudness measurements and the vocal splits made by "
+            "the singer add-on will be deleted. They are made again when needed, "
+            "so the next songs take a little longer. Your songs, styles and "
+            "settings are not touched.",
+            [("Cancel", "no"), ("Clear data", "yes")],
+            icon="delete",
+            color=DANGER,
+        ).ask()
+        # A conversion may have started while the question was open
+        if answer != "yes" or self.app.busy:
+            return
+        events = self.app.events
+
+        def work() -> None:
+            # Vocal splits can be large, so they are deleted off the window's thread
+            try:
+                (cache_dir() / "loudness.json").unlink(missing_ok=True)
+                clear_stems_cache()
+            except OSError as exc:
+                LOG.warning("Could not clear the remembered data: %s", exc)
+                events.put(
+                    (
+                        "toast",
+                        "Some remembered data couldn't be cleared; try again later",
+                        "error",
+                    )
+                )
+                return
+            events.put(("toast", "Remembered data cleared", "ok"))
+
+        threading.Thread(target=work, name="clear-cache", daemon=True).start()
 
     # ------------------------------------------------------------ about
 

@@ -2,6 +2,7 @@
 """Validates source and destination paths before any audio work starts."""
 
 import os
+from collections.abc import Iterable
 from pathlib import Path
 
 from ..core.errors import InputValidationError
@@ -92,6 +93,46 @@ def same_file(first: Path, second: Path) -> bool:
     return os.path.normcase(str(_absolute(first, strict=False))) == (
         os.path.normcase(str(_absolute(second, strict=False)))
     )
+
+
+def _path_key(path: Path) -> str:
+    """One spelling per file for comparing paths (Windows ignores letter case)."""
+    return os.path.normcase(os.path.abspath(path))
+
+
+def claim_outputs(
+    pairs: Iterable[tuple[Path, Path]],
+) -> tuple[list[tuple[Path, Path]], list[tuple[Path, str]]]:
+    """Split a run's (source, output) pairs into safe ones and songs to skip.
+
+    An output is unsafe when an earlier pair already writes to it (a.mp3 and
+    a.flac both making 'a (8D).mp3'), or when it is a different song of the
+    same run, which would be overwritten. A song written over itself (replaced
+    in place) is left for convert to allow or refuse. Pairs keep their order,
+    and each skipped source comes with the reason in plain words.
+    """
+    pairs = list(pairs)
+    sources = {_path_key(source) for source, _output in pairs}
+    claimed: dict[str, Path] = {}
+    safe: list[tuple[Path, Path]] = []
+    skipped: list[tuple[Path, str]] = []
+    for source, output in pairs:
+        key = _path_key(output)
+        if key in sources and key != _path_key(source):
+            skipped.append(
+                (source, f"Its 8D file would overwrite another song: {output.name}")
+            )
+        elif key in claimed:
+            skipped.append(
+                (
+                    source,
+                    f"{claimed[key].name} already makes {output.name} in this run",
+                )
+            )
+        else:
+            claimed[key] = source
+            safe.append((source, output))
+    return safe, skipped
 
 
 def output_name(input_path: Path, extension: str, name_style: str = "8d") -> str:

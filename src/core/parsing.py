@@ -59,9 +59,18 @@ def parse_keyframes(text: str) -> Keyframes:
     return tuple(frames)
 
 
+def format_exact_time(seconds: float) -> str:
+    """Like format_time, but parts of a second are kept: 10.6 -> '0:10.6'."""
+    # Whole milliseconds are plenty, and avoid float noise like 10.600000001
+    millis = round(seconds * 1000)
+    whole, fraction = divmod(millis, 1000)
+    text = format_time(whole)
+    return f"{text}.{fraction:03d}".rstrip("0") if fraction else text
+
+
 def format_keyframes(frames: Keyframes) -> str:
     """The reverse of parse_keyframes, used when saving a preset."""
-    return ", ".join(f"{format_time(time)}={value:g}" for time, value in frames)
+    return ", ".join(f"{format_exact_time(time)}={value:g}" for time, value in frames)
 
 
 def parse_selection(text: str, count: int) -> list[int]:

@@ -108,3 +108,13 @@ def test_the_user_environment_has_no_python(tmp_path: Path) -> None:
     assert env["AUDIO8D_HOME"] == str(tmp_path)
     assert not any(key.upper().startswith("PYTHON") for key in env)
     assert "python" not in env["PATH"].lower()
+
+
+def test_stray_macos_folder_files_are_refused(tmp_path: Path) -> None:
+    folder = _package(tmp_path)
+    (folder / "_internal" / ".DS_Store").write_bytes(b"x")
+    archive = tmp_path / "package.zip"
+    build_release.write_zip(folder, archive)
+
+    with pytest.raises(build_release.BuildError, match="developer files"):
+        build_release.check_contents(archive)

@@ -51,6 +51,7 @@ def song_trim(settings: GuiSettings, song: Path) -> Trim | None:
 
 # What a song's preview is doing, in the words its button and row show
 IDLE_WORDS = "▶ Preview"
+COMPARE_WORDS = "⇄ Compare A/B"
 STOP_WORDS = "■ Stop"
 
 
@@ -82,30 +83,37 @@ class PreviewMixin(AppBase):
             return "failed", 0.0
         return "idle", 0.0
 
-    def preview_words(self, song: Path) -> str:
-        """The words on a song's preview button and in its row."""
+    def preview_words(self, song: Path, kind: str = "preview") -> str:
+        """The words on a song's preview (or A/B compare) button and in its row."""
         state, share = self.preview_state(song)
+        if self.previews.status_of(song).kind != kind:
+            # The other kind of listen is under way: this button starts its own
+            state = "idle"
         if state == "making":
             return f"◌ Preparing… {share:.0%}"
         if state == "playing":
             return STOP_WORDS
         if state == "failed":
             return "▶ Try again"
-        return IDLE_WORDS
+        return IDLE_WORDS if kind == "preview" else COMPARE_WORDS
 
-    def preview_song(self, song: Path) -> None:
-        """Preview, Preparing… (cancels) or Stop, as the song's state calls for."""
+    def preview_song(self, song: Path, kind: str = "preview") -> None:
+        """Preview, Preparing… (cancels) or Stop, as the song's state calls for.
+
+        kind "compare" makes an A/B file instead: the original, then the 8D sound.
+        """
         state, _share = self.preview_state(song)
-        if state == "making":
+        same_kind = self.previews.status_of(song).kind == kind
+        if state == "making" and same_kind:
             self.previews.cancel()
             self.preview_wanted = None
             self._preview_changed(song)
             return
-        if state == "playing":
+        if state == "playing" and same_kind:
             self.stop_playing()
             return
         if self.busy:
-            self.toast("Previews wait until the songs are created", "error")
+            self.toast("Please wait until the songs are created", "error")
             return
         track = self.library.get(song)
         if track is None or track.state == UNREADABLE:
@@ -117,9 +125,16 @@ class PreviewMixin(AppBase):
             self.toast(f"Fix the settings first: {gui_words(str(exc))}", "error")
             return
         self.trials.pop(song, None)
-        self._start_preview(song, config)
+        self._start_preview(song, config, kind)
 
-    def _start_preview(self, song: Path, config: EffectConfig) -> None:
+    @staticmethod
+    def _listen_words(kind: str) -> str:
+        """'a preview' or 'an A/B comparison', for the status bar."""
+        return "an A/B comparison" if kind == "compare" else "a preview"
+
+    def _start_preview(
+        self, song: Path, config: EffectConfig, kind: str = "preview"
+    ) -> None:
         """Ask for one song's sample (made once, then cached) and play it when ready."""
         if self.tools_problem:
             self.toast("FFmpeg isn't working: fix it in Settings first", "error")
@@ -135,21 +150,24 @@ class PreviewMixin(AppBase):
         if self.player_song is not None:
             # A new preview replaces the one playing
             self.stop_playing()
-        self.preview_wanted = (song, "preview")
+        self.preview_wanted = (song, kind)
         self.previews.start(
             song,
             config,
             float(self.settings.preview_seconds),
+            kind,
             trim=song_trim(self.settings, song),
         )
         for changed in {previous, song} - {None}:
             self._preview_changed(changed)  # type: ignore[arg-type]
-        self.status_text.configure(text=f"Preparing a preview of {song.stem}…")
+        self.status_text.configure(
+            text=f"Preparing {self._listen_words(kind)} of {song.stem}…"
+        )
 
     def try_config(self, song: Path, config: EffectConfig, label: str) -> None:
         """Preview a song with settings that are not applied (a style or a draft)."""
         if self.busy:
-            self.toast("Previews wait until the songs are created", "error")
+            self.toast("Please wait until the songs are created", "error")
             return
         self._start_preview(song, config)
         key = fingerprint(
@@ -238,10 +256,16 @@ class PreviewMixin(AppBase):
         if not self.previews.handle(event):
             return
         _kind, _number, song, what, payload = event
+        listen = self._listen_words(self.previews.status_of(song).kind)
         if what == "ready" and self.preview_wanted is not None:
             if self.preview_wanted[0] == song:
                 self.preview_wanted = None
-                self.status_text.configure(text=f"Playing a preview of {song.stem}.")
+                self.status_text.configure(
+                    text=f"Playing {listen} of {song.stem}."
+                    if listen == "a preview"
+                    else f"Playing {listen} of {song.stem}: the original first, "
+                    "then the 8D sound."
+                )
                 self._play(song, payload)
                 return
         if what == "failed":
@@ -252,7 +276,7 @@ class PreviewMixin(AppBase):
             self.status_text.configure(text="Preview cancelled.")
         elif what == "progress":
             self.status_text.configure(
-                text=f"Preparing a preview of {song.stem}… {float(payload):.0%}"
+                text=f"Preparing {listen} of {song.stem}… {float(payload):.0%}"
             )
         self._preview_changed(song)
 

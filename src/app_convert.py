@@ -3,6 +3,7 @@
 
 import threading
 import time
+import tkinter as tk
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from .core.parsing import format_time
 from .ffmpeg import (
     FFmpegToolchain,
 )
-from .files import describe_removal
+from .files import claim_outputs, describe_removal
 from .gui_dialogs import (
     Dialog,
 )
@@ -167,8 +168,21 @@ class ConvertMixin(AppBase):
         self.run_results = {}
         self.run_outputs = {}
         todo = []
-        for item in items_for(settings, songs, self.presets):
+        items = items_for(settings, songs, self.presets)
+        # A last check: no new file may be written over another song of this run
+        _safe, clashes = claim_outputs((item.source, item.output) for item in items)
+        refused = dict(clashes)
+        for item in items:
             style = self.label(settings.song_styles.get(item.source, settings.style))
+            if item.source in refused:
+                LOG.error("%s skipped: %s", item.source.name, refused[item.source])
+                self.run_results[item.source] = (
+                    style,
+                    "Problem",
+                    gui_words(refused[item.source]),
+                    "problem",
+                )
+                continue
             # Replacing an original with a same-named 8D file is not a clash
             exists = item.output.exists() and not (
                 settings.originals == "replace" and item.output == item.source
@@ -203,12 +217,22 @@ class ConvertMixin(AppBase):
                 "Replace them",
             ):
                 return
+            # Another run may have started while the question was open
+            if self.busy:
+                return
         todo = self._songs_to_make(only)
         page = self.pages["review"]
         self.show_page("review")
         for child in page.result_note.winfo_children():  # type: ignore[attr-defined]
             child.destroy()
         page.show_results()  # type: ignore[attr-defined]
+        if not todo and any(row[3] == "problem" for row in self.run_results.values()):
+            page.show_finished(  # type: ignore[attr-defined]
+                "warning",
+                "Nothing could be created: the problems are listed below with what "
+                "to do.",
+            )
+            return
         if not todo:
             page.show_finished(  # type: ignore[attr-defined]
                 "info",
@@ -225,6 +249,7 @@ class ConvertMixin(AppBase):
         update, overall = progress_tracker(len(todo), stages)
         self.run_items = todo
         self.run_stages = stages
+        self.run_cut = False
 
         def work() -> None:
             def progress(index: int, stage: str, share: float) -> None:
@@ -280,7 +305,10 @@ class ConvertMixin(AppBase):
             finally:
                 self.events.put(("finished",))
 
-        threading.Thread(target=target, name="convert", daemon=True).start()
+        self.convert_thread = threading.Thread(
+            target=target, name="convert", daemon=True
+        )
+        self.convert_thread.start()
 
     def stop(self) -> None:
         """Stop creating (after the current step), reading, or a preview."""
@@ -296,6 +324,27 @@ class ConvertMixin(AppBase):
             if song is not None:
                 self._preview_changed(song)
             self.status_text.configure(text="Preview cancelled.")
+
+    def _escape(self, event: tk.Event) -> None:
+        """Esc: stop what is going on, asking first when songs are being created."""
+        # Esc in a text box belongs to that box, e.g. to leave a search
+        if isinstance(event.widget, (tk.Entry, tk.Text)):
+            return
+        if not self.busy:
+            self.stop()
+            return
+        if (
+            Dialog.confirm(
+                self,
+                "Stop creating?",
+                "Songs that are finished are kept; the song being made is cleaned up.",
+                "Stop",
+                "Keep working",
+                icon="stop",
+            )
+            and self.busy
+        ):
+            self.stop()
 
     def _progress_line(self) -> str:
         """'37 of 300 done · 2 problems · about 4 min left'."""
@@ -324,6 +373,8 @@ class ConvertMixin(AppBase):
         style = self.run_results.get(item.source, ("", "", "", ""))[0]
         result = outcome.result
         if result is None:
+            # A song failing after Stop was pressed was most likely cut short by it
+            self.run_cut = self.run_cut or self.cancel.is_set()
             error = outcome.error
             fix = gui_words(hints.fix_for(error) or "") if error else ""
             LOG.error("%s failed: %s", item.source.name, error)
@@ -335,13 +386,22 @@ class ConvertMixin(AppBase):
                 "problem",
             )
         else:
-            parts = [f"Saved as {result.output.name}"]
+            # The measured facts first, so a narrow column cuts only the file name
+            parts = []
             if result.quality:
                 parts.append(f"{result.quality.integrated_lufs:.1f} LUFS")
             if result.bpm:
                 parts.append(f"{result.bpm:g} BPM")
             if result.original_removed_to:
                 parts.append(f"original {describe_removal(result.original_removed_to)}")
+            if result.warning:
+                # Saved, but something beside it didn't go to plan
+                parts.append(gui_words(result.warning))
+            parts.append(
+                f"saved as {result.output.name}"
+                if parts
+                else f"Saved as {result.output.name}"
+            )
             self.run_results[item.source] = (style, "Done", "  ·  ".join(parts), "done")
             self.run_outputs[item.source] = result.output
         del index
@@ -350,11 +410,17 @@ class ConvertMixin(AppBase):
     def _show_report(self, report: BatchReport) -> None:
         """The note under the progress bar after converting a list."""
         converted = len(report.converted)
-        failed = len(report.failed)
+        # Songs refused before converting count as problems too
+        failed = sum(1 for row in self.run_results.values() if row[3] == "problem")
+        noted = sum(1 for result in report.results if result.warning)
+        notes = (
+            f" {noted} of them saved with a note; see the list below." if noted else ""
+        )
         page = self.pages["review"]
         seconds = format_time(report.seconds)
-        if self.cancel.is_set():
-            waiting = [s for s, r in self.run_results.items() if r[3] == "waiting"]
+        waiting = [s for s, r in self.run_results.items() if r[3] == "waiting"]
+        # Stop pressed just after the last song finished stopped nothing
+        if self.cancel.is_set() and (waiting or self.run_cut):
             for song in waiting:
                 style = self.run_results[song][0]
                 self.run_results[song] = (
@@ -373,15 +439,15 @@ class ConvertMixin(AppBase):
         if failed:
             page.show_finished(  # type: ignore[attr-defined]
                 "warning",
-                f"{converted} made, {failed} couldn't be made (in {seconds}). The "
-                "problems are listed below with what to do; 'Convert failed songs "
+                f"{converted} made, {failed} couldn't be made (in {seconds}).{notes} "
+                "The problems are listed below with what to do; 'Try failed songs "
                 "again' retries only those.",
             )
         else:
             page.show_finished(  # type: ignore[attr-defined]
                 "success",
                 f"All done: {converted} song{'s' if converted != 1 else ''} made in "
-                f"{seconds}. Put on your headphones and press Play.",
+                f"{seconds}.{notes} Put on your headphones and press Play.",
             )
         self.status_text.configure(
             text=f"Done: {converted} made, {failed} failed, in {seconds}."
@@ -392,13 +458,17 @@ class ConvertMixin(AppBase):
     def clear_log_view(self) -> None:
         """'Clear Logs': empty the log view (saved log files are kept)."""
         self.live("review").clear_log()  # type: ignore[attr-defined]
-        self.toast("Log view cleared (saved log files are kept)")
+        self.toast("Log view cleared (saved log files are kept)", "ok")
 
     def delete_saved_logs(self) -> None:
         """Delete the saved log files (asked for on the Settings page)."""
         deleted, failed = delete_log_files()
         if failed:
-            self.toast(f"{len(failed)} log file(s) couldn't be deleted", "error")
+            count = len(failed)
+            self.toast(
+                f"{count} log file{'s' if count != 1 else ''} couldn't be deleted",
+                "error",
+            )
         else:
             self.toast(
                 f"Deleted {deleted} saved log file{'s' if deleted != 1 else ''}", "ok"
@@ -440,7 +510,23 @@ class ConvertMixin(AppBase):
         self.overall.set(1.0)
         page = self.pages["review"]
         page.set_busy(False)
-        if self.cancel.is_set():
+        # After an unexpected failure, songs never reached count as problems to retry
+        unfinished = [
+            song
+            for song, row in self.run_results.items()
+            if row[3] in ("waiting", "working")
+        ]
+        for song in unfinished:
+            self.run_results[song] = (
+                self.run_results[song][0],
+                "Not made",
+                "Something went wrong before this song was made; try it again.",
+                "problem",
+            )
+        if unfinished:
+            page.show_results()
+        cut = any(row[3] == "stopped" for row in self.run_results.values())
+        if self.cancel.is_set() and (unfinished or cut or self.run_cut):
             self.status_text.configure(text="Stopped. Finished songs are kept.")
         elif not self.status_text.cget("text").startswith("Done"):
             self.status_text.configure(text="Done.")

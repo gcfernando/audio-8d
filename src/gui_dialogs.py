@@ -10,7 +10,6 @@ import customtkinter as ctk
 
 from .gui_widgets import (
     ACCENT_TEXT,
-    BORDER_STRONG,
     DANGER,
     INK,
     RADIUS,
@@ -22,6 +21,7 @@ from .gui_widgets import (
     button,
     entry,
     font,
+    mark_entry,
 )
 
 # The title bar and taskbar icon of every Audio8D window (also the exe's icon)
@@ -35,6 +35,17 @@ def use_app_icon(window: tk.Wm) -> None:
             window.iconbitmap(str(APP_ICON))
         except tk.TclError:
             pass
+
+
+# A question with one of these icons deletes or stops something, so it asks in red
+DANGEROUS_ICONS = ("delete", "stop")
+
+
+def icon_color(icon: str) -> tuple[str, str]:
+    """A question's icon colour: red to delete or stop, amber to warn, else blue."""
+    if icon in DANGEROUS_ICONS:
+        return DANGER
+    return WARNING if icon == "warning" else ACCENT_TEXT
 
 
 # How far a popup's inner area sits inside its frame, per display scaling, once seen
@@ -129,7 +140,7 @@ class Dialog(ctk.CTkToplevel):
         message: str,
         buttons: list[tuple[str, str]],
         icon: str = "info",
-        color: tuple[str, str] = ACCENT_TEXT,
+        color: tuple[str, str] | None = None,
     ) -> None:
         """buttons: (text, key) pairs; the pressed key ends up in self.result."""
         super().__init__(master)
@@ -145,7 +156,10 @@ class Dialog(ctk.CTkToplevel):
         self.transient(master)
         self.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
-            self, text=Icons.glyph(icon), font=Icons.font(30), text_color=color
+            self,
+            text=Icons.glyph(icon),
+            font=Icons.font(30),
+            text_color=color or icon_color(icon),
         ).grid(row=0, column=0, rowspan=2, padx=(24, 12), pady=24, sticky="n")
         ctk.CTkLabel(self, text=title, font=font(16, "bold"), anchor="w").grid(
             row=0, column=1, sticky="w", padx=(0, 24), pady=(24, 4)
@@ -162,14 +176,16 @@ class Dialog(ctk.CTkToplevel):
         self.actions.grid(row=2, column=0, columnspan=2, sticky="e", padx=24, pady=20)
         # Each button by its key, so a subclass can switch one off
         self.buttons: dict[str, ctk.CTkButton] = {}
+        # Deleting or stopping is said in red on the button that does it
+        commit = "danger" if icon in DANGEROUS_ICONS else "primary"
         for index, (text, key) in enumerate(buttons):
-            primary = index == len(buttons) - 1
+            last = index == len(buttons) - 1
             self.buttons[key] = button(
                 self.actions,
                 "",
                 text,
                 lambda key=key: self.close(key),
-                kind="primary" if primary else "outline",
+                kind=commit if last else "outline",
                 width=120,
             )
             self.buttons[key].pack(side="left", padx=(8, 0))
@@ -213,8 +229,7 @@ class Dialog(ctk.CTkToplevel):
         icon: str = "warning",
     ) -> bool:
         """Ask before something that can't easily be undone; True means go ahead."""
-        color = WARNING if icon == "warning" else ACCENT_TEXT
-        answer = cls(master, title, message, [(no, "no"), (yes, "yes")], icon, color)
+        answer = cls(master, title, message, [(no, "no"), (yes, "yes")], icon)
         return answer.ask() == "yes"
 
 
@@ -255,12 +270,12 @@ class NameDialog(Dialog):
         ok = self.buttons["ok"]
         if problem or not name:
             self.value = None
-            self.entry.configure(border_color=DANGER)
+            mark_entry(self.entry, True)
             self.note.configure(text=problem or "", text_color=DANGER)
             ok.configure(state="disabled")
             return False
         self.value = name
-        self.entry.configure(border_color=BORDER_STRONG)
+        mark_entry(self.entry, False)
         self.note.configure(text=f"It will be saved as {name}", text_color=SUCCESS)
         ok.configure(state="normal")
         return True

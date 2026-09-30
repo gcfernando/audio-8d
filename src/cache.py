@@ -42,9 +42,16 @@ def _file() -> Path:
 
 
 def measurement_key(
-    song: Path, config: EffectConfig, trim: Trim | None, sample_rate: int
+    song: Path,
+    config: EffectConfig,
+    trim: Trim | None,
+    sample_rate: int,
+    timeline_start: float = 0.0,
 ) -> str | None:
-    """A fingerprint of everything the measurement depends on."""
+    """A fingerprint of everything the measurement depends on.
+
+    timeline_start is where a preview sits in the song's movement and curves.
+    """
     try:
         stat = song.stat()
     except OSError:
@@ -65,6 +72,8 @@ def measurement_key(
             mix,
             [trim.start, trim.end] if trim else None,
             sample_rate,
+            # Only added when set, so every full-song measurement stays remembered
+            *([timeline_start] if timeline_start else []),
         ],
         sort_keys=True,
         default=str,

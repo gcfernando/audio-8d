@@ -24,6 +24,7 @@ from .core.presets import Preset
 from .core.settings import EffectConfig
 from .core.types import AudioStreamInfo
 from .gui_model import GuiSettings
+from .gui_status import StatusBar
 from .health import HealthReport
 from .library import Library
 from .pipeline import STAGE_CHECK, STAGE_RENDER, STAGE_SAVE, STAGE_STEMS
@@ -40,6 +41,8 @@ READERS = 4
 REFRESH_SECONDS = 0.4
 # Pages are prepared in the background only after this long without input
 WARM_IDLE_SECONDS = 1.0
+# Closing waits this long for a stopped conversion to delete its half-made files
+CLOSE_WAIT_SECONDS = 5.0
 
 _STAGE_WORDS = {
     STAGE_STEMS: "Splitting vocals",
@@ -87,12 +90,18 @@ class AppBase(ctk.CTk, abc.ABC):  # pylint: disable=too-many-public-methods
     # Converting
     cancel: threading.Event
     busy: bool
+    convert_thread: threading.Thread | None
     started: float
     overall_share: float
     run_results: dict[Path, tuple[str, str, str, str]]
     run_outputs: dict[Path, Path]
     run_items: list[BatchItem]
     run_stages: list[str]
+    # True once a song failed after Stop was pressed, i.e. Stop cut it short
+    run_cut: bool
+    # Folders still being looked through for songs, and the newest such look
+    scans_waiting: int
+    _scan_thread: threading.Thread | None
     # Reading song details
     read_generation: int
     _probe_cache: dict[tuple[str, int, int], AudioStreamInfo]
@@ -110,6 +119,7 @@ class AppBase(ctk.CTk, abc.ABC):  # pylint: disable=too-many-public-methods
     content: ctk.CTkFrame
     pages: Any
     makers: dict[str, Callable]
+    status_bar: StatusBar
     status_text: ctk.CTkLabel
     settings_text: ctk.CTkLabel
     overall: ctk.CTkProgressBar
@@ -160,7 +170,7 @@ class AppBase(ctk.CTk, abc.ABC):  # pylint: disable=too-many-public-methods
         raise NotImplementedError
 
     @abc.abstractmethod
-    def refresh_nav(self) -> None:
+    def refresh_nav(self, found: list[tuple[str, str]] | None = None) -> None:
         """The sidebar: which page is open, and how each step stands."""
         raise NotImplementedError
 
@@ -175,7 +185,7 @@ class AppBase(ctk.CTk, abc.ABC):  # pylint: disable=too-many-public-methods
         raise NotImplementedError
 
     @abc.abstractmethod
-    def refresh_status(self) -> None:
+    def refresh_status(self, found: list[tuple[str, str]] | None = None) -> None:
         """Update the settings summary in the status bar."""
         raise NotImplementedError
 
@@ -185,7 +195,7 @@ class AppBase(ctk.CTk, abc.ABC):  # pylint: disable=too-many-public-methods
         raise NotImplementedError
 
     @abc.abstractmethod
-    def preview_words(self, song: Path) -> str:
+    def preview_words(self, song: Path, kind: str = "preview") -> str:
         """The words on a song's preview button."""
         raise NotImplementedError
 
@@ -195,7 +205,7 @@ class AppBase(ctk.CTk, abc.ABC):  # pylint: disable=too-many-public-methods
         raise NotImplementedError
 
     @abc.abstractmethod
-    def preview_song(self, song: Path) -> None:
+    def preview_song(self, song: Path, kind: str = "preview") -> None:
         """Preview, cancel or stop one song."""
         raise NotImplementedError
 

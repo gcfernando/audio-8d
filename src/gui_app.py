@@ -26,6 +26,7 @@ import customtkinter as ctk
 
 from . import __author__, __version__, addons, hints
 from .app_base import (
+    CLOSE_WAIT_SECONDS,
     GC_INTERVAL_MS,
     LOG,
     REFRESH_SECONDS,
@@ -69,6 +70,7 @@ from .gui_output import OutputPage
 from .gui_review import ConvertPage
 from .gui_settings import SettingsPage
 from .gui_songs import SongsPage
+from .gui_status import StatusBar
 from .gui_style_chooser import StyleChooser
 from .gui_styles import StylesStep
 from .gui_summary import (
@@ -76,7 +78,6 @@ from .gui_summary import (
     style_label,
 )
 from .gui_widgets import (
-    ACCENT,
     ACCENT_SOFT,
     ACCENT_TEXT,
     BACKGROUND,
@@ -86,7 +87,6 @@ from .gui_widgets import (
     INK,
     SIDEBAR,
     SUCCESS,
-    SURFACE,
     TEXT_DIM,
     Icons,
     Section,
@@ -303,6 +303,7 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
         self.trials: dict[Path, tuple[str, str]] = {}
         self.cancel = threading.Event()
         self.busy = False
+        self.convert_thread: threading.Thread | None = None
         self.started = 0.0
         self.overall_share = 0.0
         self.current: str | None = None
@@ -310,6 +311,8 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
         self._undo: list[tuple[dict[Path, str], str]] = []
         # Reading song details: which batch is current, and what was read before
         self.read_generation = 0
+        self.scans_waiting = 0
+        self._scan_thread: threading.Thread | None = None
         self._probe_cache: dict[tuple[str, int, int], AudioStreamInfo] = {}
         self.tools_problem: str | None = None
         # The last system check (None until the first one finishes)
@@ -321,6 +324,7 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
         self.run_outputs: dict[Path, Path] = {}
         self.run_items: list[BatchItem] = []
         self.run_stages: list[str] = []
+        self.run_cut = False
         self._was_playing = False
         self._dirty = False
         self._read_progress = False
@@ -556,26 +560,13 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
 
     def _build_status(self) -> None:
         """The bottom strip: what's happening, its progress, the chosen settings."""
-        status = ctk.CTkFrame(
-            self, height=48, corner_radius=0, fg_color=SURFACE, border_width=0
-        )
-        status.grid(row=1, column=1, sticky="ew")
-        status.grid_columnconfigure(1, weight=1)
-        self.overall = ctk.CTkProgressBar(
-            status, width=200, height=8, progress_color=ACCENT
-        )
-        self.overall.set(0)
-        self.overall.grid(row=0, column=0, padx=(24, 12), pady=18)
-        self.status_text = ctk.CTkLabel(
-            status, text="Ready.", font=font(13), anchor="w"
-        )
-        self.status_text.grid(row=0, column=1, sticky="ew")
-        self.settings_text = ctk.CTkLabel(
-            status, text="", font=font(12), text_color=TEXT_DIM, anchor="e"
-        )
-        self.settings_text.grid(row=0, column=3, sticky="e", padx=24)
+        self.status_bar = StatusBar(self)
+        self.status_bar.grid(row=1, column=1, sticky="ew")
+        self.overall = self.status_bar.overall
+        self.status_text = self.status_bar.text
+        self.settings_text = self.status_bar.summary
         # Short notices take the summary's place for a moment (see Toast)
-        self.toast_slot = (status, self.settings_text)
+        self.toast_slot = (self.status_bar, self.settings_text)
 
     def _bind_keys(self) -> None:
         """Keyboard shortcuts for the common actions."""
@@ -584,7 +575,7 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
         self.bind("<Control-Return>", lambda _e: self.run_convert())
         self.bind("<Control-p>", lambda _e: self.preview_focused())
         self.bind("<Control-f>", lambda _e: self._focus_search())
-        self.bind("<Escape>", lambda _e: self.stop())
+        self.bind("<Escape>", self._escape)
         for number, key in enumerate(
             ("songs", "styles_step", "output", "review", "styles", "settings"),
             start=1,
@@ -620,6 +611,7 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
                 "the song being made is cleaned up.",
                 "Stop and close",
                 "Keep working",
+                icon="stop",
             ):
                 return
             self.cancel.set()
@@ -632,6 +624,7 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
                 "nothing half-made is kept.",
                 "Stop and close",
                 "Keep working",
+                icon="stop",
             ):
                 return
         self.addon_cancel.set()
@@ -644,6 +637,12 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
         self.previews.close()
         # Any FFmpeg, pip or Demucs still running is stopped, never left behind
         kill_all_processes()
+        # Give the stopped conversion a moment to delete its half-made files
+        worker = self.convert_thread
+        if worker is not None and worker.is_alive():
+            worker.join(CLOSE_WAIT_SECONDS)
+            if worker.is_alive():
+                LOG.warning("Closed before the stopped conversion finished tidying up")
         logging.getLogger().removeHandler(self.log_handler)
         self.destroy()
 
@@ -727,19 +726,30 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
         self.current = key
         if key == "styles_step":
             page.catch_up()  # type: ignore[attr-defined]
-        if key in ("review", "output"):
-            self.pages[key].show(self.settings)  # type: ignore[attr-defined]
+        found = None
+        if key == "review":
+            # Checked once for both step 4 and the sidebar
+            found = self.find_problems()
+            page.show(self.settings, found)  # type: ignore[attr-defined]
+        elif key == "output":
+            page.show(self.settings)  # type: ignore[attr-defined]
         if focus:
             target = self.pages[key]
             self.after(60, lambda: target.reveal(focus))  # type: ignore[attr-defined]
-        self.refresh_nav()
+        self.refresh_nav(found)
 
-    def refresh_nav(self) -> None:
-        """The sidebar: which page is open, and how each step stands."""
+    def refresh_nav(self, found: list[tuple[str, str]] | None = None) -> None:
+        """The sidebar: which page is open, and how each step stands.
+
+        found is what find_problems() just said, when the caller already asked.
+        """
         tracks = self.library.tracks
         count = len(tracks)
         own = sum(1 for t in tracks if is_custom(self.settings, t.song))
-        found = self.find_problems() if count else []
+        if not count:
+            found = []
+        elif found is None:
+            found = self.find_problems()
         output_problem = any(page == "output" for page, _t in found)
         try:
             kind = config_for(self.settings).output_format.upper()
@@ -791,16 +801,19 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
         self.live("styles_step").show(self.settings)  # type: ignore[attr-defined]
         if self.current == "output":
             self.live("output").show(self.settings)  # type: ignore[attr-defined]
+        found = None
         if self.current == "review":
-            self.live("review").show(self.settings)  # type: ignore[attr-defined]
-        self.refresh_status()
+            # Checked once for both step 4 and the sidebar
+            found = self.find_problems()
+            self.live("review").show(self.settings, found)  # type: ignore[attr-defined]
+        self.refresh_status(found)
 
     def refresh_lists(self) -> None:
         """Rebuild both song tables (after songs or styles change)."""
         self.live("songs").refresh()  # type: ignore[attr-defined]
         self.live("styles_step").refresh()  # type: ignore[attr-defined]
 
-    def refresh_status(self) -> None:
+    def refresh_status(self, found: list[tuple[str, str]] | None = None) -> None:
         """Update the settings summary on the right of the status bar."""
         try:
             text = describe(self.settings)
@@ -808,8 +821,8 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
             text = "some settings need fixing (see step 4)"
         destination = destination_for(self.settings)
         text += f"  →  {destination.name}" if destination else "  →  next to originals"
-        self.settings_text.configure(text=text)
-        self.refresh_nav()
+        self.status_bar.show_summary(text)
+        self.refresh_nav(found)
         self.remember_defaults()
 
     # ------------------------------------------------------------ the song list
@@ -835,25 +848,51 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------ events
 
     # One place that turns every kind of helper-thread news into window changes
-    def _poll(self) -> None:  # pylint: disable=too-many-branches
-        """Apply what the helper threads reported."""
-        lines: list[str] = []
+    def _poll(self) -> None:
+        """Apply what the helper threads reported, then look again shortly."""
         try:
-            for _ in range(2000):
-                event = self.events.get_nowait()
-                if event[0] == "log":
-                    lines.append(event[1])
-                else:
-                    self._handle(event)
-        except queue.Empty:
-            pass
+            self._apply_events()
+            self._tick()
+        except Exception:  # pylint: disable=broad-exception-caught
+            if self._closed():
+                return
+            LOG.exception("Could not update the window")
+        if not self._closed():
+            self.after(80, self._poll)
+
+    def _closed(self) -> bool:
+        """True once the window has been closed."""
+        try:
+            return not self.winfo_exists()
         except tk.TclError:
-            return
+            return True
+
+    def _apply_events(self) -> None:
+        """Hand each waiting event to its part; one failing never stops the rest."""
+        lines: list[str] = []
+        for _ in range(2000):
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            if event[0] == "log":
+                lines.append(event[1])
+                continue
+            try:
+                self._handle(event)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                if self._closed():
+                    return
+                LOG.error("Could not show the %r news", event[0], exc_info=exc)
+                self._show_error(exc)
         if lines:
             if "review" in self.pages:
                 self.pages["review"].write_log(lines)  # type: ignore[attr-defined]
             else:
                 self._log_waiting = (self._log_waiting + lines)[-3000:]
+
+    def _tick(self) -> None:
+        """The regular updates: the time taken, a preview ending, reading progress."""
         if self.busy:
             elapsed = time.perf_counter() - self.started
             text = self.status_text.cget("text").split("  (")[0]
@@ -889,7 +928,6 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
             self.live("styles_step").refresh()
             self.live("styles_step").show_default()
             self.refresh_nav()
-        self.after(80, self._poll)
 
     def _reading_count(self) -> int:
         """How many songs are still waiting to be read."""
@@ -898,6 +936,7 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
     def _handle(self, event: tuple) -> None:
         """One event from a helper thread, handed to the part that knows it."""
         handlers: dict[str, Callable[[tuple], None]] = {
+            "songs-found": self._songs_found,
             "probed": self._song_read,
             "unreadable": self._song_read,
             "read-done": self._reading_done,
@@ -909,7 +948,7 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
             "addon-installed": self._addon_done,
             "addon-base": lambda e: self._addon_base(e[1]),
             "link-failed": lambda e: self._link_failed(e[1]),
-            "tools-tested": lambda e: self._tools_tested(e[1], e[2]),
+            "tools-tested": lambda e: self._tools_tested(e[1], e[2], e[3]),
             "preview": self._preview_event,
             "row": self._conversion_row,
             "done": self._conversion_done,
@@ -919,36 +958,6 @@ class Audio8DApp(  # pylint: disable=too-many-instance-attributes
             "finished": self._conversion_finished,
         }
         handlers[event[0]](event)
-
-    def _song_read(self, event: tuple) -> None:
-        """One song's details were read (or it couldn't be read)."""
-        kind, generation, song, payload = event
-        track = self.library.get(song)
-        if generation != self.read_generation or track is None:
-            return
-        if kind == "probed":
-            track.info, track.state = payload, READY
-        else:
-            track.state, track.problem = UNREADABLE, payload
-        # Only the song's own rows now; counts and summaries once per tick
-        self.live("songs").update_track(track)
-        self.live("styles_step").update_track(track)
-        self._dirty = True
-        self._read_progress = True
-
-    def _reading_done(self, event: tuple) -> None:
-        """Every song of one batch has been read."""
-        if event[1] == self.read_generation and not self.busy:
-            self.status_text.configure(text="Ready.")
-            self.overall.set(0)
-        self._dirty = True
-
-    def _tools_missing(self, event: tuple) -> None:
-        """Songs couldn't be read for want of FFmpeg or FFprobe."""
-        self.tools_problem = gui_words(event[1])
-        self.status_text.configure(text="FFmpeg is needed to read the songs.")
-        self.toast("FFmpeg or FFprobe is missing: open Settings", "error")
-        self.refresh_nav()
 
     def _show_error(self, error: BaseException) -> None:
         """A problem from the work thread: a plain headline, the fix, the details."""

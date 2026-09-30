@@ -11,12 +11,13 @@ import dataclasses
 import os
 import re
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import display
-from .batch import MAX_JOBS, BatchItem, default_jobs
+from .batch import MAX_JOBS, BatchItem, default_jobs, unique_outputs
 from .core.errors import InputValidationError
 from .core.parsing import (
     format_keyframes,
@@ -757,42 +758,19 @@ def _plain_items(
     ]
 
 
-def _same_key(path: Path) -> str:
-    """How Windows compares file names: letter case doesn't matter."""
-    return os.path.normcase(str(path))
-
-
-def unique_outputs(items: list[BatchItem]) -> list[BatchItem]:
-    """Songs that would be saved under one name get ' (2)', ' (3)'… instead.
-
-    Two songs called 'Intro' from different folders, saved into one folder,
-    would otherwise overwrite each other or fail half-way.
-    """
-    taken: set[str] = set()
-    result = []
-    for item in items:
-        output, number = item.output, 2
-        while _same_key(output) in taken:
-            output = item.output.with_name(
-                f"{item.output.stem} ({number}){item.output.suffix}"
-            )
-            number += 1
-        taken.add(_same_key(output))
-        result.append(
-            item if output == item.output else dataclasses.replace(item, output=output)
-        )
-    return result
-
-
 def name_clashes(
     settings: GuiSettings, songs: Sequence[tuple[Path, Path | None]]
 ) -> int:
-    """How many songs share a new file name with an earlier song."""
+    """How many songs get ' (2)', ' (3)'… so no file is written over another."""
     try:
         plain = _plain_items(settings, songs)
     except InputValidationError:
         return 0
-    return len(plain) - len({_same_key(item.output) for item in plain})
+    return sum(
+        1
+        for item, kept in zip(plain, unique_outputs(plain), strict=True)
+        if kept.output != item.output
+    )
 
 
 # Windows' classic limit for a whole path; longer ones confuse many programs
@@ -838,6 +816,24 @@ def destination_problem(  # pylint: disable=too-many-return-statements
             "such as your Music folder."
         )
     return None
+
+
+# A 'Save in' check is trusted this long: a sleeping network drive answers slowly
+DESTINATION_CHECK_SECONDS = 2.0
+# The last folder checked: (its text, when, the answer)
+_last_destination: list[tuple[str, float, str | None]] = []
+
+
+def recent_destination_problem(text: str) -> str | None:
+    """destination_problem, reusing the answer for the same text from moments ago."""
+    now = time.monotonic()
+    if _last_destination:
+        known, when, problem = _last_destination[0]
+        if known == text and now - when < DESTINATION_CHECK_SECONDS:
+            return problem
+    problem = destination_problem(text)
+    _last_destination[:] = [(text, now, problem)]
+    return problem
 
 
 def can_write(folder: Path) -> str | None:
@@ -923,7 +919,7 @@ def problems(
                 "Choose a 'Save in' folder, or pick 'Replace them'.",
             )
         )
-    where = destination_problem(settings.destination)
+    where = recent_destination_problem(settings.destination)
     if where:
         found.append(("output", where))
     if settings.name_style == "custom":

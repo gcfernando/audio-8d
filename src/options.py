@@ -45,6 +45,12 @@ LOUDNESS_OFF = "off"
 LOUDNESS_MATCH = "match"
 # --bitrate auto: no constant bitrate, so MP3 uses its variable --quality
 BITRATE_AUTO = "auto"
+# What `--bpm off`, `--start off` and `--end off` turn into: clear the value
+SETTING_OFF = "off"
+# The words that clear a setting a style (or an earlier per-song line) gave
+_OFF_WORDS = {"off", "none"}
+# How long a --preview may be, in seconds
+PREVIEW_SECONDS = (5.0, 120.0)
 
 _BEST = PRESETS[RECOMMENDED_PRESET].config
 
@@ -121,6 +127,16 @@ _EXAMPLES = "\n".join(
                     r'audio8d "C:\Music" --per-song songs.txt',
                     "some songs with settings of their own",
                 ),
+                (
+                    r'audio8d "a.mp3" "b.flac" "C:\Music"',
+                    "several songs and folders at once",
+                ),
+                (r'audio8d "C:\Music" --dry-run', "see what would be made first"),
+                (r'audio8d "C:\Music" --suggest', "which style suits each song?"),
+                (
+                    'audio8d --rename-style "Party Mix" Dance',
+                    "also --duplicate, --delete, --export, --import-style",
+                ),
                 ("audio8d --check", "is everything installed and working?"),
                 ("audio8d --addon-status", "is the optional singer add-on installed?"),
                 ("audio8d --install-addon", "install it; --uninstall-addon removes it"),
@@ -175,8 +191,10 @@ def _bass_value(text: str) -> float:
         raise argparse.ArgumentTypeError("use a number like 120, or 'off'") from None
 
 
-def _time_value(text: str) -> float:
-    """A time like 90 or 1:30."""
+def _time_value(text: str) -> float | str:
+    """A time like 90 or 1:30, or 'off' for no start (or end) at all."""
+    if text.strip().lower() in _OFF_WORDS:
+        return SETTING_OFF
     try:
         return parse_time(text)
     except InputValidationError as exc:
@@ -184,11 +202,37 @@ def _time_value(text: str) -> float:
 
 
 def _curve_value(text: str) -> tuple[tuple[float, float], ...]:
-    """TIME=VALUE pairs, e.g. '0=10, 1:00=6'."""
+    """TIME=VALUE pairs, e.g. '0=10, 1:00=6', or 'off' for no curve."""
+    if text.strip().lower() in _OFF_WORDS:
+        return ()
     try:
         return parse_keyframes(text)
     except InputValidationError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _bpm_value(text: str) -> float | str:
+    """A tempo like 128, or 'off' to let Audio8D find the tempo itself."""
+    if text.strip().lower() in _OFF_WORDS:
+        return SETTING_OFF
+    try:
+        return float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("use a number like 128, or 'off'") from None
+
+
+def _preview_seconds(text: str) -> float:
+    """How long a preview lasts: a number of seconds within PREVIEW_SECONDS."""
+    low, high = PREVIEW_SECONDS
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = -1.0
+    if not low <= seconds <= high:
+        raise argparse.ArgumentTypeError(
+            f"use a number of seconds from {low:g} to {high:g}, e.g. 30"
+        )
+    return seconds
 
 
 def _preset_name(text: str) -> str:
@@ -348,13 +392,15 @@ def _add_sound_options(parser: argparse.ArgumentParser) -> None:
         "--speed-curve",
         type=_curve_value,
         metavar='"T=S,..."',
-        help='change the spin over time, e.g. "0=10, 1:00=6, 2:30=10"',
+        help='change the spin over time, e.g. "0=10, 1:00=6, 2:30=10"; off = '
+        "the same speed all the way through",
     )
     group.add_argument(
         "--intensity-curve",
         type=_curve_value,
         metavar='"T=A,..."',
-        help='change the movement over time, e.g. "0=0.6, 1:00=0.95"',
+        help='change the movement over time, e.g. "0=0.6, 1:00=0.95"; off = '
+        "the same movement all the way through",
     )
     group.add_argument(
         "--beat-sync",
@@ -363,10 +409,18 @@ def _add_sound_options(parser: argparse.ArgumentParser) -> None:
         help="find the song's tempo and make one circle last whole bars",
     )
     group.add_argument(
+        "--no-beat-sync",
+        dest="beat_sync",
+        action="store_const",
+        const=False,
+        help="switch beat sync off, even when the style has it on",
+    )
+    group.add_argument(
         "--bpm",
-        type=float,
+        type=_bpm_value,
         metavar="TEMPO",
-        help="the song's tempo if you know it (switches beat sync on)",
+        help="the song's tempo if you know it (switches beat sync on); off = let "
+        "Audio8D find it",
     )
     group.add_argument(
         "--vocals",
@@ -374,10 +428,20 @@ def _add_sound_options(parser: argparse.ArgumentParser) -> None:
         help="center keeps the SINGER in the middle (needs the optional singer "
         "add-on: see --addon-status and --install-addon)",
     )
+    # Both switches default to None, so a per-song line can turn either way
     group.add_argument(
         "--speakers",
-        action="store_true",
+        action="store_const",
+        const=True,
         help="make it sound right on speakers and car stereos too",
+    )
+    group.add_argument(
+        "--no-speakers",
+        dest="speakers",
+        action="store_const",
+        const=False,
+        help="made for headphones only (normal); in a --per-song file it undoes "
+        "--speakers for that song",
     )
 
 
@@ -416,7 +480,15 @@ def _add_output_options(parser: argparse.ArgumentParser) -> None:
         "--exact-loudness",
         action="store_const",
         const=True,
-        help="always hit the --loudness target exactly (light peak limiting)",
+        help="shave the loudest peaks to get as close to the --loudness target as "
+        "possible; very loud or punchy songs can still land a little under it",
+    )
+    group.add_argument(
+        "--no-exact-loudness",
+        dest="exact_loudness",
+        action="store_const",
+        const=False,
+        help="never limit peaks just to reach the --loudness target",
     )
     group.add_argument(
         "--limiter-ceiling",
@@ -449,18 +521,44 @@ def _add_output_options(parser: argparse.ArgumentParser) -> None:
         help="allow replacing a file that already has the output name",
     )
     group.add_argument(
-        "--start", type=_time_value, metavar="TIME", help="begin here, e.g. 1:30"
+        "--start",
+        type=_time_value,
+        metavar="TIME",
+        help="begin here, e.g. 1:30 (off = from the very start)",
     )
     group.add_argument(
-        "--end", type=_time_value, metavar="TIME", help="stop here, e.g. 2:00"
+        "--end",
+        type=_time_value,
+        metavar="TIME",
+        help="stop here, e.g. 2:00 (off = to the very end)",
+    )
+    # Each pair defaults to None, so a per-song line can turn either way
+    group.add_argument(
+        "--no-cover",
+        action="store_const",
+        const=True,
+        help="don't copy the album art",
     )
     group.add_argument(
-        "--no-cover", action="store_true", help="don't copy the album art"
+        "--cover",
+        dest="no_cover",
+        action="store_const",
+        const=False,
+        help="copy the album art (normal); in a --per-song file it undoes --no-cover",
     )
     group.add_argument(
         "--keep-title",
-        action="store_true",
+        action="store_const",
+        const=True,
         help="don't add ' (8D)' to the song's title tag",
+    )
+    group.add_argument(
+        "--title-tag",
+        dest="keep_title",
+        action="store_const",
+        const=False,
+        help="add ' (8D)' to the song's title tag (normal); in a --per-song file it "
+        "undoes --keep-title",
     )
     group.add_argument(
         "--no-check",
@@ -485,12 +583,13 @@ def _add_extra_options(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument(
         "--preview",
-        type=float,
+        type=_preview_seconds,
         nargs="?",
         const=30.0,
         metavar="SECONDS",
-        help="listen to a short sample from the loudest part (default 30 s); it is "
-        "played and then deleted, unless you give an OUTPUT file to keep it",
+        help="listen to a short sample from the loudest part (5 to 120 s, default "
+        "30); it is played and then deleted, unless you give an OUTPUT file to keep "
+        "it",
     )
     group.add_argument(
         "--compare",
@@ -502,12 +601,25 @@ def _add_extra_options(parser: argparse.ArgumentParser) -> None:
         "--play", action="store_true", help="open the new file in your music player"
     )
     group.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show the settings and where each new song would be saved, then stop "
+        "without making anything",
+    )
+    group.add_argument(
+        "--suggest",
+        action="store_true",
+        help="suggest the style that suits each song best (from its tags), then "
+        "stop without making anything",
+    )
+    group.add_argument(
         "--save-style",
         dest="save_preset",
         metavar="NAME",
         help="save these sound settings as your own style (use it with --style NAME)",
     )
     group.add_argument("--save-preset", dest="save_preset", help=argparse.SUPPRESS)
+    _add_style_options(group)
     group.add_argument(
         "--gui", action="store_true", help="open the Audio8D window instead"
     )
@@ -532,6 +644,52 @@ def _add_extra_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_style_options(group: argparse._ArgumentGroup) -> None:
+    """Looking after your saved styles, like the window's Your styles page."""
+    group.add_argument(
+        "--style-description",
+        metavar="TEXT",
+        help="a few words about the style you save with --save-style or --update-style",
+    )
+    group.add_argument(
+        "--update-style",
+        metavar="NAME",
+        help="save these sound settings into your saved style NAME (it starts from "
+        "that style unless you add --style)",
+    )
+    group.add_argument(
+        "--rename-style",
+        nargs=2,
+        metavar=("NAME", "NEW_NAME"),
+        help="give one of your saved styles a new name, then stop",
+    )
+    group.add_argument(
+        "--duplicate-style",
+        nargs=2,
+        metavar=("NAME", "NEW_NAME"),
+        help="copy one of your saved styles under a new name, then stop",
+    )
+    group.add_argument(
+        "--delete-style",
+        metavar="NAME",
+        help="delete one of your saved styles (songs already made are not "
+        "touched), then stop",
+    )
+    group.add_argument(
+        "--export-style",
+        nargs=2,
+        metavar=("NAME", "FILE"),
+        help="save a style to a file, to keep or share, then stop",
+    )
+    group.add_argument(
+        "--import-style",
+        nargs="+",
+        metavar=("FILE", "NAME"),
+        help="add a style from a file exported by Audio8D, optionally under a new "
+        "NAME, then stop",
+    )
+
+
 def _add_setup_options(parser: argparse.ArgumentParser) -> None:
     """Checking and choosing the tools, and the optional singer add-on."""
     group = parser.add_argument_group("setup and checks")
@@ -540,6 +698,17 @@ def _add_setup_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="check FFmpeg, FFprobe, Python and the singer add-on (each is run, "
         "not just looked for), say what to fix, then stop",
+    )
+    group.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="forget the remembered loudness measurements and singer splits (they "
+        "are made again when needed), then stop",
+    )
+    group.add_argument(
+        "--delete-logs",
+        action="store_true",
+        help="delete the saved technical log files, then stop",
     )
     group.add_argument(
         "--ffmpeg",
@@ -615,7 +784,16 @@ def create_parser() -> argparse.ArgumentParser:
         "output",
         type=Path,
         nargs="?",
-        help="where to save the 8D song (leave out: '<song> (8D).mp3')",
+        help="where to save the 8D song when there is one song (leave out: "
+        "'<song> (8D).mp3')",
+    )
+    parser.add_argument(
+        "more",
+        type=Path,
+        nargs="*",
+        metavar="MORE",
+        help="more songs or folders, made together like a folder (with just two, "
+        "the second is a song only when it is a folder or --output-dir is given)",
     )
     _add_sound_options(parser)
     _add_output_options(parser)
@@ -682,6 +860,8 @@ def typed_changes(args: argparse.Namespace) -> dict[str, object]:
         overrides[level.field] = value
     if overrides.get("bitrate") == BITRATE_AUTO:
         overrides["bitrate"] = None
+    if overrides.get("bpm") == SETTING_OFF:
+        overrides["bpm"] = None
     if args.loudness is not None:
         overrides["loudness_target"] = (
             None if args.loudness in (LOUDNESS_OFF, LOUDNESS_MATCH) else args.loudness

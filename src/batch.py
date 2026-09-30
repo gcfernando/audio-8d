@@ -1,6 +1,8 @@
 # Developed by ::> Gehan Fernando
 """Converts many songs at once, a few at a time, and keeps score."""
 
+import dataclasses
+import logging
 import os
 import threading
 import time
@@ -9,9 +11,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .core.errors import Audio8DError
+from .core.errors import Audio8DError, ConversionError
 from .core.settings import EffectConfig
 from .pipeline import ConversionResult, ConvertOptions, convert
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +119,13 @@ def run_batch(  # pylint: disable=too-many-arguments,too-many-locals
             )
         except Audio8DError as exc:
             outcome.error = exc
+        except Exception:  # pylint: disable=broad-exception-caught
+            # An unexpected fault fails only this song; the log keeps the traceback
+            LOG.exception("Unexpected error converting %s", outcome.item.source)
+            outcome.error = ConversionError(
+                "Something unexpected went wrong with this song. "
+                "The log file has the details."
+            )
         outcome.seconds = time.perf_counter() - begin
         return outcome
 
@@ -137,6 +148,37 @@ def run_batch(  # pylint: disable=too-many-arguments,too-many-locals
 
     report.seconds = time.perf_counter() - started
     return report
+
+
+def _path_key(path: Path) -> str:
+    """One spelling per file for comparing paths (Windows ignores letter case)."""
+    return os.path.normcase(os.path.abspath(path))
+
+
+def unique_outputs(items: list[BatchItem]) -> list[BatchItem]:
+    """Songs that would be saved under one name get ' (2)', ' (3)'… instead.
+
+    Two songs called 'Intro' from different folders, saved into one folder,
+    would otherwise overwrite each other or fail half-way. A name that is
+    another song of the same run is skipped too, so no song is written over;
+    a song saved over itself (replaced in place) keeps its name.
+    """
+    sources = {_path_key(item.source) for item in items}
+    taken: set[str] = set()
+    result = []
+    for item in items:
+        own = _path_key(item.source)
+        output, number = item.output, 2
+        while (key := _path_key(output)) in taken or (key in sources and key != own):
+            output = item.output.with_name(
+                f"{item.output.stem} ({number}){item.output.suffix}"
+            )
+            number += 1
+        taken.add(_path_key(output))
+        result.append(
+            item if output == item.output else dataclasses.replace(item, output=output)
+        )
+    return result
 
 
 def progress_tracker(

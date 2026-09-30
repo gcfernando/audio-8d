@@ -4,6 +4,7 @@
 import argparse
 import dataclasses
 import logging
+import os
 import runpy
 import sys
 import threading
@@ -23,27 +24,38 @@ from .batch import (
     default_jobs,
     progress_tracker,
     run_batch,
+    unique_outputs,
 )
+from .cli_manage import (
+    check_style_options,
+    run_setup_task,
+    run_style_action,
+    save_style,
+    update_style,
+)
+from .cli_manage import explain as _explain
 from .core.errors import Audio8DError, DependencyError, InputValidationError
-from .core.locations import presets_file
+from .core.locations import log_file
 from .core.preferences import load_preferences
 from .core.presets import LEGACY_STYLES, RECOMMENDED_PRESET, Preset
 from .core.settings import (
     EffectConfig,
 )
 from .core.types import AudioStreamInfo, Trim
-from .core.user_presets import save_user_preset
-from .display_health import show_addon, show_health
+from .display_health import show_health
 from .ffmpeg import FFmpegToolchain, probe_audio, set_preferred_paths
 from .files import (
+    claim_outputs,
     default_output_for,
     find_songs,
     resolve_input,
+    same_file,
 )
 from .health import check_environment
 from .logs import start_log_file
 from .opener import open_path as open_in_player
 from .options import (
+    SETTING_OFF,
     create_parser,
     known_presets,
     resolve_config,
@@ -59,6 +71,7 @@ from .pipeline import (
 )
 from .player import PLAYING, Player, PlayerError
 from .previews import make_preview, temporary_folder
+from .recommend import SongFacts, batch_suggestion, recommend
 from .song_settings import needs_singer, song_convert_options, song_effect
 
 # pylint: enable=wrong-import-position
@@ -93,14 +106,6 @@ def configure_logging(verbose: bool) -> None:
                 )
                 handler.audio8d_quiet = True  # type: ignore[attr-defined]
     start_log_file()
-
-
-def _explain(painter: display.Painter, error: Audio8DError) -> None:
-    """Known problems get a one-line message and a plain fix, never a traceback."""
-    LOG.error("%s", error)
-    fix = hints.fix_for(error)
-    if fix:
-        display.show_fix(painter, fix)
 
 
 def use_saved_tools() -> None:
@@ -148,6 +153,8 @@ class Plan:  # pylint: disable=too-many-instance-attributes
     speakers: bool = False
     # Lines of the --per-song file
     rules: tuple[SongRule, ...] = ()
+    # --dry-run: show what would be made, then stop before making anything
+    dry_run: bool = False
 
 
 def song_setup(song: Path, plan: Plan) -> tuple[EffectConfig, ConvertOptions]:
@@ -225,6 +232,20 @@ def run_single(
     except Audio8DError as exc:
         _explain(painter, exc)
         return 1
+    # Like a folder (and the window), an 8D song that is already made is skipped
+    replacing_itself = plan.options.replace_original and same_file(
+        output_path, input_path
+    )
+    if output_path.exists() and not plan.overwrite and not replacing_itself:
+        painter.line(
+            painter.paint(f"  Skipped (already made): {output_path.name}", "dim")
+        )
+        painter.line(
+            painter.paint(
+                "  Nothing new to create. Add --overwrite to make it again.", "yellow"
+            )
+        )
+        return 0
 
     display.show_settings(
         painter,
@@ -242,6 +263,9 @@ def run_single(
         painter.line(
             painter.paint("  This song has settings of its own (--per-song).", "cyan")
         )
+    if plan.dry_run:
+        _show_dry_run(painter, [(input_path, output_path)])
+        return 0
 
     progress_bar = display.ProgressBar(painter)
     started = time.perf_counter()
@@ -261,6 +285,8 @@ def run_single(
     progress_bar.finish()
 
     display.show_result(painter, result, time.perf_counter() - started)
+    if result.warning:
+        painter.line(painter.paint(f"  {result.warning}", "yellow"))
     if result.original_removed_to:
         display.show_removed(painter, input_path, result.original_removed_to)
     display.show_listen(painter)
@@ -272,27 +298,53 @@ def run_single(
 
 
 def _split_existing(
-    found: list[Path], plan: Plan, folder: Path
-) -> tuple[list[BatchItem], list[Path]]:
-    """Songs still to make, and 8D copies that already exist (skipped)."""
+    found: Sequence[tuple[Path, Path | None]], plan: Plan
+) -> tuple[list[BatchItem], list[Path], list[tuple[Path, str]], int]:
+    """Songs still to make, 8D copies already made, clashes, and how many renamed.
+
+    found holds (song, the folder it was found in, or None for a song given
+    on its own). Songs that would share a new file name get ' (2)', ' (3)'…
+    exactly as in the window; no song is ever written over another of the run.
+    """
+    planned: list[BatchItem] = []
+    for song, folder in found:
+        config, options = song_setup(song, plan)
+        planned.append(
+            BatchItem(
+                song,
+                _output_for(song, plan, relative_to=folder, config=config),
+                config if config != plan.config else None,
+                options if options != plan.options else None,
+            )
+        )
+    named = unique_outputs(planned)
+    renamed = sum(1 for old, new in zip(planned, named, strict=True) if old != new)
+    # A safety net: after numbering nothing should clash, but a clash is never made
+    safe, clashes = claim_outputs((item.source, item.output) for item in named)
+    # A set keeps the lookup quick for folders with thousands of songs
+    safe = set(safe)
     items: list[BatchItem] = []
     skipped: list[Path] = []
-    for song in found:
-        config, options = song_setup(song, plan)
-        output = _output_for(song, plan, relative_to=folder, config=config)
-        replacing_itself = plan.options.replace_original and output == song
-        if output.exists() and not plan.overwrite and not replacing_itself:
-            skipped.append(output)
+    for item in named:
+        if (item.source, item.output) not in safe:
+            continue
+        # A song replaced in place is never 'already made'
+        in_place = plan.options.replace_original and same_file(item.output, item.source)
+        if item.output.exists() and not plan.overwrite and not in_place:
+            skipped.append(item.output)
         else:
-            items.append(
-                BatchItem(
-                    song,
-                    output,
-                    config if config != plan.config else None,
-                    options if options != plan.options else None,
-                )
-            )
-    return items, skipped
+            items.append(item)
+    return items, skipped, clashes, renamed
+
+
+def _show_dry_run(painter: display.Painter, pairs: Sequence[tuple[Path, Path]]) -> None:
+    """--dry-run: each song and where its 8D copy would be saved, then stop."""
+    painter.line("  " + painter.paint("Dry run: nothing is made.", "bold", "cyan"))
+    for song, output in pairs:
+        painter.line(f"  {song.name}" + painter.paint(f"  ->  {output}", "cyan"))
+    painter.line(
+        painter.paint("  Run the same command without --dry-run to make them.", "dim")
+    )
 
 
 def _batch_display(
@@ -321,18 +373,71 @@ def _batch_display(
     return progress_bar, on_progress, on_done
 
 
-def run_folder(  # pylint: disable=too-many-locals
+def run_folder(
     folder: Path, plan: Plan, *, banner: bool = True, songs: list[Path] | None = None
 ) -> int:
     """Convert every song in a folder, several at once, then show the totals."""
-    painter = display.Painter(sys.stderr)
     try:
         found = (
             songs if songs is not None else find_songs(folder, recursive=plan.recursive)
         )
         if not found:
             raise InputValidationError(f"No songs found in {folder}")
-        items, skipped = _split_existing(found, plan, folder)
+    except Audio8DError as exc:
+        _explain(display.Painter(sys.stderr), exc)
+        return 1
+    return _run_songs(folder, [(song, folder) for song in found], plan, banner=banner)
+
+
+def collect_songs(
+    paths: Sequence[Path], recursive: bool
+) -> list[tuple[Path, Path | None]]:
+    """Every song named on the command line: (song, the folder it was found in).
+
+    A song given on its own has no folder. A song named twice is made once.
+    """
+    found: list[tuple[Path, Path | None]] = []
+    seen: set[str] = set()
+    for path in paths:
+        if path.is_dir():
+            songs = find_songs(path, recursive=recursive)
+            if not songs:
+                raise InputValidationError(f"No songs found in {path}")
+            pairs: list[tuple[Path, Path | None]] = [(song, path) for song in songs]
+        else:
+            resolve_input(path)
+            pairs = [(path, None)]
+        for song, folder in pairs:
+            key = os.path.normcase(os.path.abspath(song))
+            if key not in seen:
+                seen.add(key)
+                found.append((song, folder))
+    return found
+
+
+def run_many(paths: Sequence[Path], plan: Plan) -> int:
+    """Convert several songs and folders together, like one folder."""
+    try:
+        found = collect_songs(paths, plan.recursive)
+    except Audio8DError as exc:
+        _explain(display.Painter(sys.stderr), exc)
+        return 1
+    count = len(found)
+    label = Path(f"{count} song{'s' if count != 1 else ''} from {len(paths)} places")
+    return _run_songs(label, found, plan)
+
+
+def _run_songs(  # pylint: disable=too-many-locals,too-many-branches
+    label: Path,
+    found: Sequence[tuple[Path, Path | None]],
+    plan: Plan,
+    *,
+    banner: bool = True,
+) -> int:
+    """Convert a list of songs, several at once, then show the totals."""
+    painter = display.Painter(sys.stderr)
+    try:
+        items, skipped, clashes, renamed = _split_existing(found, plan)
         check_singer([(item.source.name, item.config or plan.config) for item in items])
     except Audio8DError as exc:
         _explain(painter, exc)
@@ -341,7 +446,7 @@ def run_folder(  # pylint: disable=too-many-locals
     display.show_settings(
         painter,
         version=__version__,
-        song_in=folder,
+        song_in=label,
         song_out=plan.output_dir or Path("next to each original"),
         preset=plan.preset,
         config=plan.config,
@@ -359,7 +464,7 @@ def run_folder(  # pylint: disable=too-many-locals
             )
         )
     for rule in plan.rules:
-        if not any(rule.matches(song) for song in found):
+        if not any(rule.matches(song) for song, _folder in found):
             painter.line(
                 painter.paint(
                     f"  Per-song line {rule.line} ('{rule.pattern}') matched no song.",
@@ -368,16 +473,28 @@ def run_folder(  # pylint: disable=too-many-locals
             )
     for path in skipped:
         painter.line(painter.paint(f"  Skipped (already made): {path.name}", "dim"))
-    if not items:
+    for song, why in clashes:
+        painter.line(painter.paint(f"  Skipped {song.name}: {why}.", "yellow"))
+    if renamed:
         painter.line(
             painter.paint(
-                "  Nothing new to create. Add --overwrite to make them again.", "yellow"
+                f"  {renamed} song{'s' if renamed != 1 else ''} would get the same "
+                "file name as another song, so ' (2)', ' (3)'... is added to keep "
+                "every file.",
+                "yellow",
             )
         )
+    if not items:
+        # --overwrite only helps songs already made, never songs that clash
+        again = " Add --overwrite to make them again." if skipped else ""
+        painter.line(painter.paint(f"  Nothing new to create.{again}", "yellow"))
         return 0
     display.show_batch_plan(
         painter, len(items), plan.jobs, plan.output_dir, plan.options.replace_original
     )
+    if plan.dry_run:
+        _show_dry_run(painter, [(item.source, item.output) for item in items])
+        return 0
 
     progress_bar, on_progress, on_done = _batch_display(painter, plan, len(items))
     cancel = threading.Event()
@@ -401,6 +518,13 @@ def run_folder(  # pylint: disable=too-many-locals
         return 1
     progress_bar.close()
     display.show_batch_summary(painter, report)
+    for outcome in report.converted:
+        # The song was made; something around it (e.g. the original) needs a look
+        if outcome.result is not None and outcome.result.warning:
+            painter.line(
+                painter.paint(f"  {outcome.item.source.name}: ", "dim")
+                + painter.paint(outcome.result.warning, "yellow")
+            )
     for outcome in report.failed:
         assert outcome.error is not None
         fix = hints.fix_for(outcome.error)
@@ -468,7 +592,7 @@ def run_preview(
     progress_bar = display.ProgressBar(painter)
     try:
         resolve_input(input_path)
-        config, _options = song_setup(input_path, plan)
+        config, options = song_setup(input_path, plan)
         check_singer([(input_path.name, config)])
         display.show_settings(
             painter,
@@ -478,6 +602,7 @@ def run_preview(
             preset=plan.preset,
             config=config,
             source=_peek_source(input_path),
+            trim=options.trim,
             presets=plan.presets or None,
         )
         what = (
@@ -488,9 +613,15 @@ def run_preview(
         painter.line(painter.paint(f"  Preview: {what}.", "cyan"))
         started = time.perf_counter()
         if output is not None:
-            # An OUTPUT file was asked for, so this sample is kept on purpose
+            # Saved to OUTPUT on purpose; cut from the trimmed song, as in the window
             if kind == "compare":
-                compare(input_path, output, config, on_progress=progress_bar.update)
+                compare(
+                    input_path,
+                    output,
+                    config,
+                    on_progress=progress_bar.update,
+                    trim=options.trim,
+                )
             else:
                 preview(
                     input_path,
@@ -498,6 +629,7 @@ def run_preview(
                     config,
                     seconds=seconds,
                     on_progress=progress_bar.update,
+                    trim=options.trim,
                 )
             progress_bar.finish()
             display.show_done(painter, output, time.perf_counter() - started)
@@ -512,6 +644,7 @@ def run_preview(
                 seconds=seconds,
                 kind=kind,
                 on_progress=progress_bar.update,
+                trim=options.trim,
             )
             progress_bar.finish()
             _listen(painter, file, seconds if kind == "preview" else 40.0)
@@ -533,26 +666,37 @@ def run_preview(
     return 0
 
 
-def _save_preset(args: argparse.Namespace, config: EffectConfig) -> int:
-    """Save the typed settings as a named style and say where."""
-    painter = display.Painter(sys.stderr)
+def run_suggest(paths: Sequence[Path], plan: Plan) -> int:
+    """--suggest: the style that suits each song, from its tags, like the window."""
+    painter = display.Painter(sys.stdout)
     try:
-        # Names become PascalCase ('party mix' -> 'PartyMix'), and never replace one
-        name = save_user_preset(
-            args.save_preset,
-            config,
-            based_on=args.preset or RECOMMENDED_PRESET,
-            summary=f"your style, based on {args.preset or RECOMMENDED_PRESET}",
-        )
+        found = collect_songs(paths, plan.recursive)
     except Audio8DError as exc:
-        _explain(painter, exc)
+        _explain(display.Painter(sys.stderr), exc)
         return 1
-    painter.line(
-        "  "
-        + painter.paint(f"Saved your style '{name}'", "bold", "green")
-        + painter.paint(f" in {presets_file()}", "green")
-    )
-    painter.line(f'  Use it with: audio8d "My Song.mp3" --style "{name}"')
+    painter.line(painter.paint("  Reading the songs' tags...", "dim"))
+    recommendations = []
+    for song, _folder in found:
+        facts = SongFacts.from_info(_peek_source(song), song.stem)
+        suggestion = recommend(facts, plan.presets)
+        recommendations.append(suggestion)
+        painter.line(
+            f"  {song.name}: "
+            + painter.paint(suggestion.primary.style, "bold", "pink")
+            + painter.paint(f"  {suggestion.primary.reason}", "dim")
+        )
+    if len(recommendations) > 1:
+        best = batch_suggestion(recommendations)
+        painter.line()
+        painter.line(
+            "  For all of them: "
+            + painter.paint(best.style, "bold", "pink")
+            + painter.paint(f"  {best.reason}", "dim")
+        )
+        style = best.style
+    else:
+        style = recommendations[0].primary.style
+    painter.line(f"  Use it with: --style {style}")
     return 0
 
 
@@ -566,11 +710,9 @@ def plan_from_args(args: argparse.Namespace) -> Plan:
     replace = bool(args.replace)
     # Replacing usually means "put the 8D song where the old one was"
     name_style = args.name or ("original" if replace else "8d")
-    trim = (
-        Trim(args.start, args.end)
-        if args.start is not None or args.end is not None
-        else None
-    )
+    start = None if args.start == SETTING_OFF else args.start
+    end = None if args.end == SETTING_OFF else args.end
+    trim = Trim(start, end) if start is not None or end is not None else None
     if (
         trim
         and trim.start is not None
@@ -600,6 +742,7 @@ def plan_from_args(args: argparse.Namespace) -> Plan:
         default=resolve_config(args, presets, with_speakers=False),
         speakers=bool(args.speakers),
         rules=rules,
+        dry_run=args.dry_run,
     )
 
 
@@ -609,129 +752,8 @@ def run_check(verbose: bool) -> int:
     painter.line(painter.paint("  Checking... (each tool is run once)", "dim"))
     report = check_environment()
     show_health(painter, report, verbose)
+    painter.line(painter.paint(f"  Log file: {log_file()}", "dim"))
     return 0 if report.ok else 1
-
-
-def run_addon_status() -> int:
-    """--addon-status: is the singer add-on installed? (exit code 0 = installed)."""
-    painter = display.Painter(sys.stdout)
-    painter.line(painter.paint("  Checking the singer add-on...", "dim"))
-    status = addons.singer_status(refresh=True)
-    show_addon(painter, status)
-    return 0 if status.ready else 1
-
-
-def _addon_python(painter: display.Painter) -> Path | None:
-    """The Python that builds the add-on's folder, or None after saying why not."""
-    found = addons.find_python(addons.preferred_python())
-    if found.ok and found.path is not None:
-        return found.path
-    painter.line(painter.paint(f"  {found.problem}", "red"))
-    display.show_fix(painter, addons.AddonStatus(found).fix())
-    return None
-
-
-def _addon_progress(
-    painter: display.Painter,
-) -> Callable[[addons.AddonProgress], None]:
-    """Print add-on progress as it changes: every 5%, or when the stage changes."""
-    # The last stage printed and its 5% step (-1 while unmeasured)
-    shown: list[tuple[str, int]] = [("", -1)]
-    lock = threading.Lock()
-
-    def show(progress: addons.AddonProgress) -> None:
-        """Print one report, unless it only moves a little within the same stage."""
-        percent = progress.percent
-        step = -1 if percent is None else percent // 5
-        with lock:
-            stage, before = shown[0]
-            if stage == progress.stage and step <= before and not progress.finished:
-                return
-            shown[0] = (progress.stage, step)
-        detail = f"  {progress.detail}" if progress.detail else ""
-        colour = "red" if progress.failed else "green" if progress.finished else "cyan"
-        painter.line("  " + painter.paint(progress.words(), colour) + detail)
-
-    return show
-
-
-def run_install_addon(repair: bool = False) -> int:
-    """--install-addon / --repair-addon: set up the add-on's folder, then check it."""
-    painter = display.Painter(sys.stdout)
-    status = addons.singer_status(refresh=True)
-    if status.ready and not repair:
-        painter.line(
-            painter.paint("  The add-on is already installed; nothing to do.", "green")
-        )
-        show_addon(painter, status)
-        return 0
-    python = _addon_python(painter)
-    if python is None:
-        return 1
-    painter.line(
-        "  "
-        + painter.paint(
-            "Repairing the singer add-on" if repair else "Installing the singer add-on",
-            "bold",
-            "cyan",
-        )
-        + f" into {addons.addon_dir()}"
-    )
-    painter.line(
-        painter.paint(
-            "  About 1 GB is downloaded; this takes a few minutes. Ctrl+C stops it.",
-            "dim",
-        )
-    )
-    cancel = threading.Event()
-    job = addons.repair_addon if repair else addons.install_addon
-    try:
-        worked, tail = job(
-            python,
-            lambda line: painter.line(painter.paint(f"    {line}", "dim")),
-            cancel,
-            on_progress=_addon_progress(painter),
-        )
-    except KeyboardInterrupt:
-        cancel.set()
-        painter.line(painter.paint("  Stopped. Nothing half-made was kept.", "yellow"))
-        return 1
-    # A finished install has just checked the add-on, so that answer is reused
-    status = addons.singer_status()
-    if worked and status.ready:
-        show_addon(painter, status)
-        return 0
-    painter.line(painter.paint("  The add-on is not ready: " + status.summary(), "red"))
-    if not worked:
-        painter.line(painter.paint("  What happened:", "dim"))
-        for line in tail.splitlines()[-8:]:
-            painter.line(painter.paint(f"    {line}", "dim"))
-    display.show_fix(painter, status.fix())
-    return 1
-
-
-def run_uninstall_addon() -> int:
-    """--uninstall-addon: delete the add-on's own folder (Audio8D keeps working)."""
-    painter = display.Painter(sys.stdout)
-    worked, message = addons.uninstall_addon(on_progress=_addon_progress(painter))
-    painter.line(painter.paint(f"  {message}", "green" if worked else "red"))
-    if worked:
-        painter.line(
-            "  Audio8D works as before; only 'Keep the singer in the middle' "
-            "(--vocals center) needs the add-on."
-        )
-    return 0 if worked else 1
-
-
-def _run_addon(args: argparse.Namespace) -> int | None:
-    """--addon-status, --install-addon, --repair-addon or --uninstall-addon."""
-    if args.addon_status:
-        return run_addon_status()
-    if args.install_addon or args.repair_addon:
-        return run_install_addon(repair=args.repair_addon)
-    if args.uninstall_addon:
-        return run_uninstall_addon()
-    return None
 
 
 def _run_interactive() -> int:
@@ -799,24 +821,61 @@ def _parse(
     args, extra = parser.parse_known_args(argv)
     if not args.gui or any(word.startswith("-") for word in extra):
         return parser.parse_args(argv), []
-    given = [args.input, args.output, *map(Path, extra)]
+    given = [args.input, args.output, *args.more, *map(Path, extra)]
     return args, [song for song in given if song is not None]
 
 
-def _convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Convert (or preview, or compare) the song or folder on the command line."""
+def _songs_given(args: argparse.Namespace) -> list[Path]:
+    """Every song and folder typed, when there are several; [] for just one.
+
+    Two paths stay SONG OUTPUT, as always, unless the second is a folder that
+    exists, or it exists and --output-dir says where the new songs go.
+    """
+    paths = [args.input, args.output, *args.more]
+    if args.more:
+        return paths
+    second = args.output
+    if second is None or not second.exists():
+        return []
+    if args.input.is_dir() or second.is_dir() or args.output_dir is not None:
+        return paths
+    return []
+
+
+def _convert(  # pylint: disable=too-many-return-statements,too-many-branches
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Convert (or preview, or compare) the songs or folders on the command line."""
     painter = display.Painter(sys.stderr)
+    check_style_options(parser, args)
+    done = run_style_action(args)
+    if done is not None:
+        return done
+    several = _songs_given(args)
+    if several:
+        # The second path is a song here, so its ending never chooses the format
+        args.output = None
     try:
         plan = plan_from_args(args)
     except Audio8DError as exc:
         _explain(painter, exc)
         return 1
-    if args.save_preset:
-        code = _save_preset(args, plan.config)
+    if args.save_preset or args.update_style:
+        # 'Safe for speakers too' is chosen apart, never saved inside a style
+        config = plan.default or plan.config
+        code = (save_style if args.save_preset else update_style)(args, config)
         if code or args.input is None:
             return code
     if args.input is None:
         parser.error("the following arguments are required: input")
+    if args.dry_run and (args.preview is not None or args.compare):
+        parser.error("--dry-run shows what would be made; leave out --preview")
+    if args.suggest:
+        return run_suggest(several or [args.input], plan)
+    if several:
+        if args.preview is not None or args.compare:
+            parser.error("--preview and --compare work on one song at a time")
+        return run_many(several, plan)
     if args.input.is_dir():
         if args.output is not None:
             parser.error("with a folder, choose where to save with --output-dir")
@@ -844,9 +903,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args, songs = _parse(parser, argv)
     configure_logging(args.verbose)
     use_typed_tools(args)
-    addon = _run_addon(args)
-    if addon is not None:
-        return addon
+    task = run_setup_task(args)
+    if task is not None:
+        return task
     if args.check:
         return run_check(args.verbose)
     if args.gui:

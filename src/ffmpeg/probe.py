@@ -96,7 +96,8 @@ def parse_probe_output(raw_json: str) -> AudioStreamInfo:
     return AudioStreamInfo(
         codec_name=codec_name,
         channels=channels,
-        sample_rate=sample_rate,
+        # Some broken files report a rate of 0, which means the same as no rate
+        sample_rate=sample_rate if sample_rate and sample_rate > 0 else None,
         duration_seconds=duration,
         bit_rate=bit_rate,
         title=_tag(tags, "title"),

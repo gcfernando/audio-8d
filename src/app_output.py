@@ -9,8 +9,8 @@ from .app_base import (
 )
 from .gui_model import (
     OUTPUT_FIELDS,
-    destination_problem,
     name_problem,
+    recent_destination_problem,
     reset_file_settings,
     set_file_settings,
 )
@@ -54,7 +54,7 @@ class OutputMixin(AppBase):
 
     def destination_problem(self) -> str | None:
         """Why the chosen folder can't be used, or None."""
-        return destination_problem(self.settings.destination)
+        return recent_destination_problem(self.settings.destination)
 
     def set_default_output(self, **values: object) -> None:
         """Output defaults for every song that has no output settings of its own."""
@@ -74,7 +74,7 @@ class OutputMixin(AppBase):
         """Songs go back to the default file settings."""
         count = reset_file_settings(self.settings, songs)
         self._files_changed()
-        self.toast(f"{self._songs_word(count)} back to the default file settings")
+        self.toast(f"{self._songs_word(count)} back to the default file settings", "ok")
 
     def _files_changed(self) -> None:
         """Songs' file settings changed: refresh what shows them."""

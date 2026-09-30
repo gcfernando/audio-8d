@@ -64,6 +64,9 @@ def test_ffmpeg_paths_are_tested_before_they_are_saved(app, tmp_path: Path) -> N
     settings = app.pages["settings"]
     row = settings.rows["ffmpeg"]
     row.path.insert(0, str(tmp_path / "nowhere" / "ffmpeg.exe"))
+    # The start-up check comes first, so it is never mistaken for this one
+    pump(app, lambda: bool(app.tool_checks), 30)
+    settings.checks = {}
     settings.save_paths()
     pump(app, lambda: bool(settings.checks), 30)
     pump(app, lambda: False, 0.5)
@@ -71,6 +74,12 @@ def test_ffmpeg_paths_are_tested_before_they_are_saved(app, tmp_path: Path) -> N
     assert not settings.checks["ffmpeg"].ok
     assert load_preferences()[0].ffmpeg_path == ""
     assert "There is no file" in row.result.cget("text")
+    # A path that was only typed, never saved, doesn't block converting
+    assert app.tools_problem is None
+    settings.checks = {}
+    settings.test()
+    pump(app, lambda: bool(settings.checks), 30)
+    assert not settings.checks["ffmpeg"].ok and app.tools_problem is None
 
     row.path.delete(0, "end")
     settings.checks = {}
@@ -424,9 +433,7 @@ def test_the_full_guide_always_opens_online(app, monkeypatch) -> None:
     )
     app.open_link(app_setup_url())
     pump(app, lambda: bool(opened), 20)
-    assert opened == [
-        "https://github.com/gcfernando/python_codes/blob/main/8D/README.md"
-    ]
+    assert opened == ["https://github.com/gcfernando/audio-8d/blob/main/README.md"]
 
     # A browser that can't start never freezes the window: the address is copied
     shown: list[str] = []
@@ -435,7 +442,7 @@ def test_the_full_guide_always_opens_online(app, monkeypatch) -> None:
     app.open_link(app_setup_url())
     pump(app, lambda: bool(shown), 20)
     assert shown == ["The browser didn't open"]
-    assert app.clipboard_get().endswith("/8D/README.md")
+    assert app.clipboard_get() == app_setup_url()
 
 
 def app_setup_url() -> str:

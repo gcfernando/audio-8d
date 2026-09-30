@@ -16,9 +16,8 @@ __all__ = ["open_path"]
 import os
 import tkinter as tk
 import tkinter.font as tkfont
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from tkinter import ttk
 from typing import Literal
 
 import customtkinter as ctk
@@ -35,13 +34,19 @@ def _draw_scrollbar_without_flush(
 ) -> None:
     """Draw a scrollbar without forcing the whole window to lay itself out first."""
     # CustomTkinter 5.2 forces a full layout pass on every redraw; Tk redraws anyway
-    # pylint: disable-next=protected-access
-    self._canvas.update_idletasks = _no_flush
+    _skip_flush(self)
     _SCROLLBAR_DRAW(self, no_color_updates)
 
 
 def _no_flush() -> None:
     """Stands in for update_idletasks on a scrollbar's canvas."""
+
+
+def _skip_flush(widget: tk.Misc) -> None:
+    """Make a widget's drawing canvas skip its layout pass (if it has one)."""
+    canvas = getattr(widget, "_canvas", None)
+    if canvas is not None:
+        canvas.update_idletasks = _no_flush
 
 
 # pylint: disable-next=protected-access
@@ -55,13 +60,31 @@ def _draw_optionmenu_without_flush(
     self: ctk.CTkOptionMenu, no_color_updates: bool = False
 ) -> None:
     """Draw a drop-down list without a full layout pass of the whole window."""
-    # pylint: disable-next=protected-access
-    self._canvas.update_idletasks = _no_flush
+    _skip_flush(self)
     _OPTIONMENU_DRAW(self, no_color_updates)
 
 
 # pylint: disable-next=protected-access
 ctk.CTkOptionMenu._draw = _draw_optionmenu_without_flush  # type: ignore[method-assign]
+
+
+def _recolor_every_widget(tracker: type) -> None:
+    """Tell every widget about a theme change, even if some go away meanwhile."""
+    dark = tracker.appearance_mode == 1  # type: ignore[attr-defined]
+    mode = "Dark" if dark else "Light"
+    # A copy, as widgets destroyed mid-way made CustomTkinter skip their neighbours
+    for callback in list(tracker.callback_list):  # type: ignore[attr-defined]
+        try:
+            callback(mode)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # A widget destroyed meanwhile has nothing left to recolour
+            continue
+
+
+# Only where the tracker still keeps its list the way CustomTkinter 5.2 and 6.0 do
+if isinstance(getattr(ctk.AppearanceModeTracker, "callback_list", None), list):
+    _TRACKER = ctk.AppearanceModeTracker
+    _TRACKER.update_callbacks = classmethod(_recolor_every_widget)  # type: ignore
 
 
 # CustomTkinter re-grids hidden widgets on a size change; these patches keep them hidden
@@ -118,12 +141,29 @@ DANGER = ("#B42318", "#F97066")
 DANGER_FILL = ("#B42318", "#C0392B")
 DANGER_HOVER = ("#912018", "#A93226")
 DANGER_SOFT = ("#FDECEA", "#34191A")
+# A grey tag behind neutral badges such as 'Optional'
+NEUTRAL_SOFT = ("#E5E8EE", "#2A2F38")
+# A filled button while it can't be used: grey, never a dim blue or red
+DISABLED_FILL = ("#E1E5EB", "#2A2F38")
+# Hover hints: dark in both themes, so they stand apart from the page
+TOOLTIP_FILL = ("#1F2937", "#2B303A")
+TOOLTIP_TEXT = ("#F8FAFC", "#F8FAFC")
 # Kept for older callers: the sidebar used to be its own colour
 SURFACE_SIDEBAR = SIDEBAR
 
-# One corner radius and control height everywhere
+# One corner radius for controls; panels inside a card and cards are rounder
 RADIUS = 8
+PANEL_RADIUS = 10
+CARD_RADIUS = 12
+# Card actions and dialog buttons; toolbars, rows and inline buttons use TOOL_HEIGHT
 CONTROL_HEIGHT = 36
+# A toolbar button, as in 'Your songs' on steps 1 and 2
+TOOL_WIDTH = 190
+TOOL_HEIGHT = 32
+# The one big pair of buttons: Create and Stop on step 4
+HERO_HEIGHT = 44
+# Every song list's search box
+SEARCH_WIDTH = 240
 
 # Windows 11/10 icon-font glyphs, with plain characters for everyone else
 _GLYPHS = {
@@ -382,11 +422,8 @@ class Button(ctk.CTkButton):
         """Grey filled buttons when disabled; back to their colour when enabled."""
         if "state" in kwargs and self.kind in ("primary", "danger"):
             off = kwargs["state"] == "disabled"
-            kwargs.setdefault("fg_color", _DISABLED_FILL if off else self._fill)
+            kwargs.setdefault("fg_color", DISABLED_FILL if off else self._fill)
         super().configure(require_redraw, **kwargs)  # type: ignore[arg-type]
-
-
-_DISABLED_FILL = ("#E1E5EB", "#2A2F38")
 
 
 def button(
@@ -512,14 +549,13 @@ class Tooltip:  # pylint: disable=too-few-public-methods
         self.window.wm_overrideredirect(True)
         self.window.wm_geometry(f"+{x}+{y}")
         self.window.attributes("-topmost", True)
-        dark = ctk.get_appearance_mode() == "Dark"
         tk.Label(
             self.window,
             text=text,
             justify="left",
             wraplength=380,
-            background="#2B303A" if dark else "#1F2937",
-            foreground="#F8FAFC",
+            background=shade(TOOLTIP_FILL),
+            foreground=shade(TOOLTIP_TEXT),
             padx=10,
             pady=7,
             font=("Segoe UI", 9),
@@ -560,16 +596,16 @@ def hint(
     return label
 
 
-# Labels that wrap to their parent's width, per parent (by its Tk path name)
-_FITTED: dict[str, list[tuple[ctk.CTkLabel, int]]] = {}
-
-
 def fit_width(label: ctk.CTkLabel, master: tk.Misc, margin: int) -> None:
     """Keep a label's text wrapped inside master, whatever the window size or scale."""
     # One resize handler per parent, which forgets labels that have been destroyed
-    fitted = _FITTED.get(str(master))
+    fitted: list[tuple[ctk.CTkLabel, int]] | None = getattr(
+        master, "audio8d_fitted", None
+    )
     if fitted is None:
-        fitted = _FITTED[str(master)] = []
+        # Kept on the parent itself, so the list goes when the parent does
+        fitted = []
+        master.audio8d_fitted = fitted  # type: ignore[attr-defined]
 
         def resize(event: tk.Event) -> None:
             fitted[:] = [(lbl, gap) for lbl, gap in fitted if lbl.winfo_exists()]
@@ -583,7 +619,74 @@ def fit_width(label: ctk.CTkLabel, master: tk.Misc, margin: int) -> None:
                     lbl.configure(wraplength=wrap)
 
         master.bind("<Configure>", resize, add=True)
+    else:
+        # Parents that swap their labels often would otherwise pile up old ones
+        fitted[:] = [(lbl, gap) for lbl, gap in fitted if lbl.winfo_exists()]
     fitted.append((label, margin))
+
+
+def flow(
+    container: ctk.CTkFrame,
+    parts: Sequence[tk.Widget],
+    gap: int = 12,
+    line_gap: int = 8,
+) -> None:
+    """Lay parts out left to right in container, starting a new line when one won't fit.
+
+    The room is the width of container's parent, less the same padding on both sides.
+    """
+    shown: list[tuple[int, int]] = []
+    # One frame per line, so a wide part on one line never pushes another line apart
+    lines: list[ctk.CTkFrame] = []
+
+    def lay_out(room: float) -> None:
+        # Widths are real pixels, while the gap is in unscaled units
+        space = gap * container._get_widget_scaling()  # pylint: disable=protected-access
+        places: list[tuple[int, int]] = []
+        row = column = 0
+        used = 0.0
+        for part in parts:
+            width = part.winfo_reqwidth()
+            if column and used + space + width > room:
+                row, column, used = row + 1, 0, 0.0
+            used += (space if column else 0) + width
+            places.append((row, column))
+            column += 1
+        # Every move costs a layout pass, so only a real change is applied
+        if places == shown:
+            return
+        shown[:] = places
+        needed = places[-1][0] + 1 if places else 0
+        while len(lines) < needed:
+            line = ctk.CTkFrame(container, fg_color="transparent", width=0, height=0)
+            line.grid(row=len(lines), column=0, sticky="w", pady=(line_gap, 0))
+            lines.append(line)
+        lines[0].grid_configure(pady=0)
+        for index, line in enumerate(lines):
+            if index < needed:
+                line.grid()
+            else:
+                line.grid_remove()
+        for part, (row, column) in zip(parts, places, strict=True):
+            part.grid(
+                in_=lines[row],
+                row=0,
+                column=column,
+                sticky="w",
+                padx=(gap if column else 0, 0),
+            )
+            # The line frames came later, so the parts are lifted back above them
+            part.lift()
+
+    def refit(_event: object = None) -> None:
+        parent = container.master
+        if parent.winfo_width() > 1:
+            lay_out(parent.winfo_width() - 2 * container.winfo_x())
+
+    lay_out(float("inf"))
+    container.master.bind("<Configure>", refit, add=True)
+    # The parts grow too, e.g. when the size setting changes
+    container.bind("<Configure>", refit, add=True)
 
 
 class Badge(ctk.CTkLabel):
@@ -597,7 +700,7 @@ class Badge(ctk.CTkLabel):
         "success": (SUCCESS_SOFT, SUCCESS),
         "warning": (WARNING_SOFT, WARNING),
         "danger": (DANGER_SOFT, DANGER),
-        "neutral": (("#E5E8EE", "#2A2F38"), INK),
+        "neutral": (NEUTRAL_SOFT, INK),
     }
 
     def __init__(self, master: tk.Misc, text: str, kind: str = "accent") -> None:
@@ -654,7 +757,7 @@ class Card(ctk.CTkFrame):
         super().__init__(
             master,
             fg_color=SURFACE,
-            corner_radius=12,
+            corner_radius=CARD_RADIUS,
             border_width=1,
             border_color=BORDER,
         )
@@ -708,7 +811,7 @@ class Section(Card):
         self.toggle_button = ctk.CTkButton(
             header,
             width=120,
-            height=32,
+            height=TOOL_HEIGHT,
             corner_radius=RADIUS,
             fg_color=SURFACE,
             hover_color=ACCENT_SOFT,
@@ -765,10 +868,27 @@ def entry(master: tk.Misc, placeholder: str = "", width: int = 260) -> ctk.CTkEn
         text_color=INK,
         placeholder_text_color=TEXT_DIM,
     )
-    # The focus ring: a thicker border in the focus colour while typing
-    box.bind("<FocusIn>", lambda _e: box.configure(border_width=2), add=True)
-    box.bind("<FocusOut>", lambda _e: box.configure(border_width=1), add=True)
+    box.audio8d_problem = False  # type: ignore[attr-defined]
+    # The focus ring: a thicker border in the focus colour (red while it's wrong)
+    box.bind("<FocusIn>", lambda _e: _entry_edge(box, True), add=True)
+    box.bind("<FocusOut>", lambda _e: _entry_edge(box, False), add=True)
     return box
+
+
+def _entry_edge(box: ctk.CTkEntry, focused: bool) -> None:
+    """Draw a text box's border for its focus and whether its text can be used."""
+    problem = getattr(box, "audio8d_problem", False)
+    color = DANGER if problem else (FOCUS if focused else BORDER_STRONG)
+    try:
+        set_changed(box, border_width=2 if focused else 1, border_color=color)
+    except tk.TclError:
+        pass
+
+
+def mark_entry(box: ctk.CTkEntry, problem: bool) -> None:
+    """Show a text box as wrong (red border) or fine, keeping its focus ring."""
+    box.audio8d_problem = problem  # type: ignore[attr-defined]
+    _entry_edge(box, box.focus_get() is box._entry)  # pylint: disable=protected-access
 
 
 class Notice(ctk.CTkFrame):
@@ -813,58 +933,9 @@ class Notice(ctk.CTkFrame):
             fit_width(self.message, self, 190 if action else 70)
         if action:
             words, command = action
-            button(self, "", words, command, width=110, height=30).grid(
+            button(self, "", words, command, width=110, height=TOOL_HEIGHT).grid(
                 row=0, column=2, padx=12, pady=6
             )
-
-
-def style_tables(root: tk.Misc) -> None:
-    """Give Tk's table (ttk.Treeview) the window's colours, for the current theme."""
-    style = ttk.Style(root)
-    try:
-        style.theme_use("clam")
-    except tk.TclError:
-        pass
-    bg, ink, dim = shade(SURFACE), shade(INK), shade(TEXT_DIM)
-    head, line = shade(SURFACE_ALT), shade(BORDER)
-    chosen, chosen_ink = shade(ACCENT_SOFT), shade(INK)
-    scaling = ctk.ScalingTracker.get_widget_scaling(root)
-    row_height = int(30 * scaling)
-    size = max(9, round(10 * scaling))
-    style.configure(
-        "Audio8D.Treeview",
-        background=bg,
-        fieldbackground=bg,
-        foreground=ink,
-        bordercolor=line,
-        lightcolor=line,
-        darkcolor=line,
-        rowheight=row_height,
-        font=("Segoe UI", size),
-        borderwidth=1,
-        relief="flat",
-    )
-    style.map(
-        "Audio8D.Treeview",
-        background=[("selected", "focus", shade(ACCENT)), ("selected", chosen)],
-        foreground=[("selected", "focus", "#FFFFFF"), ("selected", chosen_ink)],
-    )
-    style.configure(
-        "Audio8D.Treeview.Heading",
-        background=head,
-        foreground=dim,
-        bordercolor=line,
-        lightcolor=head,
-        darkcolor=head,
-        relief="flat",
-        font=("Segoe UI", size, "bold"),
-        padding=(8, int(6 * scaling)),
-    )
-    style.map(
-        "Audio8D.Treeview.Heading",
-        background=[("active", shade(ACCENT_SOFT))],
-    )
-    style.layout("Audio8D.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
 
 
 # ------------------------------------------------------------------ pages

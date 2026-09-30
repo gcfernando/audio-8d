@@ -48,10 +48,12 @@ from .gui_model import (
 )
 from .gui_style_save import check_name, checked_style
 from .gui_widgets import (
+    CONTROL_HEIGHT,
     DANGER,
     INK,
     SUCCESS,
     TEXT_DIM,
+    TOOL_HEIGHT,
     Badge,
     Section,
     button,
@@ -432,7 +434,7 @@ class CustomizeDialog(Modal):  # pylint: disable=too-many-instance-attributes
             self._open_addon,
             kind="quiet",
             width=190,
-            height=28,
+            height=TOOL_HEIGHT,
         )
         self.singer_setup.grid(row=3, column=0, sticky="w", padx=(50, 0), pady=(0, 4))
         self.output_part = Section(
@@ -461,7 +463,7 @@ class CustomizeDialog(Modal):  # pylint: disable=too-many-instance-attributes
             "Preview",
             self._preview,
             width=170,
-            height=34,
+            height=CONTROL_HEIGHT,
             tooltip="Listen with these changes before applying them; nothing is kept",
         )
         self.preview_button.grid(row=0, column=0, sticky="w")
@@ -474,15 +476,21 @@ class CustomizeDialog(Modal):  # pylint: disable=too-many-instance-attributes
             "Reset to default",
             self._reset,
             width=180,
-            height=34,
+            height=CONTROL_HEIGHT,
             tooltip="Remove this song's own settings: it follows the defaults again",
         )
         self.reset_button.grid(row=0, column=1, padx=(8, 0))
-        button(footer, "", "Cancel", self.cancel, width=110, height=34).grid(
-            row=0, column=2, padx=(8, 0)
-        )
+        button(
+            footer, "", "Cancel", self.cancel, width=110, height=CONTROL_HEIGHT
+        ).grid(row=0, column=2, padx=(8, 0))
         self.apply_button = button(
-            footer, "check", "Apply", self.apply, kind="primary", width=130, height=34
+            footer,
+            "check",
+            "Apply",
+            self.apply,
+            kind="primary",
+            width=130,
+            height=CONTROL_HEIGHT,
         )
         self.apply_button.grid(row=0, column=3, padx=(8, 0))
         self.apply_text = str(self.apply_button.cget("text"))

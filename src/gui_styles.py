@@ -22,6 +22,9 @@ from .gui_model import (
 from .gui_table import Column, SongTable
 from .gui_widgets import (
     INK,
+    SEARCH_WIDTH,
+    TOOL_HEIGHT,
+    TOOL_WIDTH,
     Card,
     Notice,
     Page,
@@ -29,6 +32,7 @@ from .gui_widgets import (
     button,
     clear_children,
     entry,
+    flow,
     font,
     hint,
     icon_text,
@@ -98,7 +102,7 @@ class StylesStep(Page):  # pylint: disable=too-many-instance-attributes
         self.change = button(
             actions,
             "sound",
-            "Change style",
+            "Change style…",
             self.app.open_style_chooser,
             kind="primary",
             width=180,
@@ -112,7 +116,7 @@ class StylesStep(Page):  # pylint: disable=too-many-instance-attributes
             lambda: self.app.open_customize([]),
             kind="quiet",
             width=180,
-            height=30,
+            height=TOOL_HEIGHT,
             tooltip="Movement, speed, space and more, for every song that isn't "
             "customized",
         ).pack(anchor="e", pady=(6, 0))
@@ -169,7 +173,7 @@ class StylesStep(Page):  # pylint: disable=too-many-instance-attributes
             tools, text="", font=font(12, "bold"), anchor="w", width=150
         )
         self.selection_text.grid(row=0, column=0, sticky="w")
-        self.search = entry(tools, "Search songs, artists, albums…", 240)
+        self.search = entry(tools, "Search songs, artists, albums…", SEARCH_WIDTH)
         self.search.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self.search.bind("<KeyRelease>", lambda _e: self._search())
         actions = ctk.CTkFrame(body, fg_color="transparent")
@@ -180,45 +184,56 @@ class StylesStep(Page):  # pylint: disable=too-many-instance-attributes
             "Preview",
             self._preview,
             kind="primary",
-            width=190,
-            height=32,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
             tooltip="Listen to a short part of the selected song (Ctrl+P); nothing "
             "is saved",
         )
-        self.preview.pack(side="left", padx=(0, 6))
+        self.compare = button(
+            actions,
+            "compare",
+            "Compare A/B",
+            self._compare,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
+            tooltip="Hear the same part of the selected song twice: the original, "
+            "then in 8D; nothing is saved",
+        )
         self.customize = button(
             actions,
             "settings",
             "Customize…",
             self._customize,
-            width=190,
-            height=32,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
             tooltip="Change the sound of the selected song(s) only (Enter)",
         )
-        self.customize.pack(side="left", padx=6)
         self.reset = button(
             actions,
             "clear",
             "Reset to default",
             self._reset,
-            width=180,
-            height=32,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
             tooltip="The selected songs lose their own settings and follow the "
             "defaults again",
         )
-        self.reset.pack(side="left", padx=6)
         self.suggested = button(
             actions,
             "wand",
             "Use suggested styles",
             self._use_suggested,
             kind="quiet",
-            width=200,
-            height=32,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
             tooltip="Give songs the style that suits their genre (where Audio8D is "
             "sure)",
         )
-        self.suggested.pack(side="left", padx=6)
+        # The buttons wrap onto a second line in a narrow window
+        flow(
+            actions,
+            (self.preview, self.compare, self.customize, self.reset, self.suggested),
+        )
         body.grid_columnconfigure(0, weight=1)
         self.table = SongTable(
             body,
@@ -287,6 +302,14 @@ class StylesStep(Page):  # pylint: disable=too-many-instance-attributes
             return
         self.app.preview_song(song)
 
+    def _compare(self) -> None:
+        """Play (or stop) the original and the 8D sound of the selected song."""
+        song = self.focused_song()
+        if song is None:
+            self.app.toast("Select a song to compare")
+            return
+        self.app.preview_song(song, "compare")
+
     def _customize(self) -> None:
         """Customize the selected songs."""
         songs = self.selected_songs()
@@ -314,6 +337,11 @@ class StylesStep(Page):  # pylint: disable=too-many-instance-attributes
         can_preview = track is not None and track.state != UNREADABLE
         words = self.app.preview_words(focus) if focus else "▶ Preview"
         self.preview.configure(
+            text=f"  {words.split(' ', 1)[1]}",
+            state="normal" if can_preview else "disabled",
+        )
+        words = self.app.preview_words(focus, "compare") if focus else "⇄ Compare A/B"
+        self.compare.configure(
             text=f"  {words.split(' ', 1)[1]}",
             state="normal" if can_preview else "disabled",
         )

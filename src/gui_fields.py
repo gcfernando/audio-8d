@@ -15,7 +15,6 @@ from .gui_widgets import (
     ACCENT_HOVER,
     ACCENT_SOFT,
     ACCENT_TEXT,
-    BORDER_STRONG,
     CONTROL_HEIGHT,
     DANGER,
     FOCUS,
@@ -25,13 +24,17 @@ from .gui_widgets import (
     SURFACE_ALT,
     TEXT_DIM,
     TEXT_DISABLED,
+    TOOL_HEIGHT,
+    TOOL_WIDTH,
     WHITE,
     Tooltip,
     accessible_button,
+    button,
     entry,
     font,
     hint,
     keyboard,
+    mark_entry,
     set_changed,
 )
 
@@ -236,7 +239,7 @@ class ChoiceField(Field):
     One Tab stop for the whole row; the arrow keys move between the options.
     """
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         master: tk.Misc,
         label: str,
@@ -246,8 +249,15 @@ class ChoiceField(Field):
         tooltip: str = "",
         more: str = "",
         wrap: int | None = None,
+        *,
+        width: int | None = None,
     ) -> None:
-        """options maps shown text -> value."""
+        """options maps shown text -> value.
+
+        The row sits at the left, at least width wide, shared equally by the
+        options, which grow for longer words. By default each option is at
+        least half a toolbar button wide, so the words decide the size.
+        """
         super().__init__(master, label, help_text, tooltip, more, wrap)
         self.options = options
         self.on_change = on_change
@@ -263,11 +273,16 @@ class ChoiceField(Field):
             text_color=INK,
             text_color_disabled=TEXT_DISABLED,
             font=font(12),
-            height=32,
+            height=TOOL_HEIGHT,
         )
         self.buttons.grid(
-            row=0, column=1, columnspan=2, sticky="ew", padx=(10, 6), pady=(4, 0)
+            row=0, column=1, columnspan=2, sticky="w", padx=(10, 6), pady=(4, 0)
         )
+        if width is None:
+            width = TOOL_WIDTH // 2 * len(options)
+        # The row takes its size from its options, so each one gets its share
+        for inner in self._choice_buttons().values():
+            inner.configure(width=width // len(options))
         self._paint()
         keyboard(
             self.buttons,
@@ -280,11 +295,52 @@ class ChoiceField(Field):
                 "<Down>": lambda: self._step(1),
             },
         )
-        # pylint: disable-next=protected-access
-        for inner in self.buttons._buttons_dict.values():
+        for inner in self._choice_buttons().values():
             inner.bind("<Button-1>", lambda _e: self.buttons.focus_set(), add=True)
         if tooltip:
             Tooltip(self.label, tooltip)
+        # In a narrow window the options move under the name instead of being cut
+        self._stacked = False
+        self.bind("<Configure>", self._fit, add=True)
+
+    def _fit(self, event: tk.Event) -> None:
+        """Put the options under the name when they don't fit beside it."""
+        scale = self._get_widget_scaling()
+        room = event.width - self.label.winfo_reqwidth() - 22 * scale
+        self._stack(self.buttons.winfo_reqwidth() > room)
+
+    def _stack(self, stacked: bool) -> None:
+        """Options beside the name (False) or on a line of their own below it."""
+        if stacked == self._stacked:
+            return
+        self._stacked = stacked
+        below = 1 if stacked else 0
+        column, span = (0, 3) if stacked else (1, 2)
+        self.label.grid(
+            row=0, column=0, columnspan=span if stacked else 1, sticky="w",
+            padx=(6, 0), pady=(4, 0),
+        )  # fmt: skip
+        self.buttons.grid(
+            row=below, column=column, columnspan=span, sticky="w",
+            padx=(6, 6) if stacked else (10, 6), pady=(4, 0),
+        )  # fmt: skip
+        indent = (6, 0) if stacked else (0, 0)
+        parts: list[tuple[ctk.CTkBaseClass, dict[str, object]]] = [
+            (self.help, {"row": 1 + below, "pady": (1, 4)})
+        ]
+        if self.more is not None:
+            parts.append((self.more, {"row": 2 + below, "pady": (0, 4)}))
+        for part, place in parts:
+            place.update(column=column, columnspan=span, sticky="ew", padx=indent)
+            if part.winfo_manager() == "grid":
+                part.grid(**place)
+            else:
+                # Hidden on purpose: only where it would come back is changed
+                part.audio8d_grid = place  # type: ignore[attr-defined]
+
+    def _choice_buttons(self) -> dict[str, ctk.CTkButton]:
+        """The row's own button per option (empty if CustomTkinter hides them)."""
+        return getattr(self.buttons, "_buttons_dict", {})
 
     def _paint(self) -> None:
         """Selected text white on the accent; others in the normal ink."""
@@ -293,18 +349,21 @@ class ChoiceField(Field):
         if getattr(self, "_painted", None) == chosen:
             return
         self._painted = chosen
-        # pylint: disable-next=protected-access
-        for shown, inner in self.buttons._buttons_dict.items():
+        for shown, inner in self._choice_buttons().items():
             inner.configure(text_color=WHITE if shown == chosen else INK)
 
     def _step(self, direction: int) -> None:
         """Pick the next or previous option from the keyboard."""
-        if self.buttons._state == "disabled":  # pylint: disable=protected-access
+        # CustomTkinter 5.2 can't cget a choice row's state, so it is read directly
+        if getattr(self.buttons, "_state", "normal") == "disabled":
             return
         # Greyed-out options are skipped, as a click can't choose them either
-        # pylint: disable-next=protected-access
-        inner = self.buttons._buttons_dict
-        shown = [s for s in self.options if inner[s].cget("state") != "disabled"]
+        inner = self._choice_buttons()
+        shown = [
+            s
+            for s in self.options
+            if s not in inner or inner[s].cget("state") != "disabled"
+        ]
         current = self.buttons.get()
         if not shown:
             return
@@ -332,11 +391,9 @@ class ChoiceField(Field):
     def enable_option(self, value: object, on: bool) -> None:
         """Grey out one option (the others stay usable)."""
         for shown, option in self.options.items():
-            if option == value:
-                # pylint: disable-next=protected-access
-                self.buttons._buttons_dict[shown].configure(
-                    state="normal" if on else "disabled"
-                )
+            inner = self._choice_buttons().get(shown)
+            if option == value and inner is not None:
+                inner.configure(state="normal" if on else "disabled")
 
 
 class SwitchField(ctk.CTkFrame):
@@ -512,10 +569,10 @@ class EntryField(Field):
         problem = self.on_change(self.entry.get())
         self.ok = not problem
         if problem:
-            self.entry.configure(border_color=DANGER)
+            mark_entry(self.entry, True)
             self.explain(problem, DANGER)
             return False
-        self.entry.configure(border_color=BORDER_STRONG)
+        mark_entry(self.entry, False)
         return True
 
     def set(self, text: str) -> None:
@@ -527,6 +584,21 @@ class EntryField(Field):
     def enable(self, on: bool) -> None:
         """Grey the box out, or bring it back."""
         self.entry.configure(state="normal" if on else "disabled")
+
+
+def browse_button(
+    master: tk.Misc, command: Callable[[], None], tooltip: str = ""
+) -> ctk.CTkButton:
+    """'Browse…' beside a path box, the same size wherever something is picked."""
+    return button(
+        master,
+        "folder",
+        "Browse…",
+        command,
+        width=110,
+        height=TOOL_HEIGHT,
+        tooltip=tooltip,
+    )
 
 
 def trim_fields(

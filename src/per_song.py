@@ -9,8 +9,11 @@ One song per line: the song (a file name, a path, or a pattern such as
     "Storm Wall.flac"    --vocals center --loudness match
     *.wav                --format flac
     "Intro.wav"          --default
+    "Live.mp3"           --no-speakers --cover --start off
 
 Every line that matches a song applies, top to bottom, so later lines win.
+The opposite switches (--no-speakers, --cover, --title-tag, --no-beat-sync,
+--start off...) undo what the command line or an earlier line gave a song.
 --default is 'Reset to default': it drops what earlier lines gave that song.
 The settings are combined by song_settings, exactly like the window's.
 """
@@ -22,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .core.errors import InputValidationError
-from .options import create_parser, typed_changes
+from .options import SETTING_OFF, create_parser, typed_changes
 from .song_settings import SPEAKERS
 
 # The options that describe one song; everything else belongs to the whole run
@@ -101,16 +104,17 @@ def _same(one: Path, other: Path) -> bool:
 def _changes(args: argparse.Namespace) -> dict[str, object]:
     """The settings one line gives its songs, in song_settings' names."""
     changes = typed_changes(args)
-    if args.speakers:
-        changes[SPEAKERS] = True
+    if args.speakers is not None:
+        changes[SPEAKERS] = args.speakers
+    # 'off' gives the song no start (or end), whatever the whole run has
     if args.start is not None:
-        changes["trim_start"] = args.start
+        changes["trim_start"] = None if args.start == SETTING_OFF else args.start
     if args.end is not None:
-        changes["trim_end"] = args.end
-    if args.no_cover:
-        changes["keep_cover"] = False
-    if args.keep_title:
-        changes["tag_title"] = False
+        changes["trim_end"] = None if args.end == SETTING_OFF else args.end
+    if args.no_cover is not None:
+        changes["keep_cover"] = not args.no_cover
+    if args.keep_title is not None:
+        changes["tag_title"] = not args.keep_title
     return changes
 
 

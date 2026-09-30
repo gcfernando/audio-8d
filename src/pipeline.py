@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import cache
 from .analysis import (
+    STEM_RATE,
     QualityReport,
     check_output,
     detect_bpm,
@@ -87,10 +88,14 @@ class LoudnessPlan:
     cached: bool = False
 
     @property
+    def silent(self) -> bool:
+        """True for silence, which ebur128 reports as -70 LUFS and stays silent."""
+        return self.measured.integrated_lufs <= -70.0
+
+    @property
     def expected_lufs(self) -> float:
-        """Where the song lands; a volume change moves loudness by exactly the gain."""
-        # ebur128 reports silence as -70 LUFS, and silence stays silent
-        if self.measured.integrated_lufs <= -70.0:
+        """Where the volume change aims; the limiter can still pull the song lower."""
+        if self.silent:
             return self.measured.integrated_lufs
         return (
             self.target_lufs
@@ -101,7 +106,11 @@ class LoudnessPlan:
     @property
     def held_back(self) -> bool:
         """True when the song stays below target to protect its loudest peaks."""
-        return not self.exact and self.expected_lufs < self.target_lufs - 0.05
+        return (
+            not self.exact
+            and not self.silent
+            and self.expected_lufs < self.target_lufs - 0.05
+        )
 
     def limits_peaks(self, ceiling: float) -> bool:
         """True when the limiter will have short peaks to catch after the gain."""
@@ -124,11 +133,9 @@ class ConvertOptions:
     check: bool = True
     # Move the original aside (Recycle Bin, or renamed) once the new one is saved
     replace_original: bool = False
-    # Song time (after the song's own trim) this render starts at: a preview of
-    # the chorus moves exactly as the finished song does at that moment
+    # Start time in the trimmed song, so a preview moves exactly as the full song does
     timeline_start: float = 0.0
-    # The format whose sound this render copies (sample rate, lossy peak margin)
-    # while being saved as another; a WAV preview of an MP3 song, say
+    # Format whose sound this copies while saved as another (a WAV preview of an MP3)
     render_as: str | None = None
 
 
@@ -145,6 +152,8 @@ class ConversionResult:  # pylint: disable=too-many-instance-attributes
     beats_per_turn: int = 0
     # Where the original went when replace_original was on (see describe_removal)
     original_removed_to: str | None = None
+    # Something worth telling the user although the song itself was saved
+    warning: str | None = None
 
 
 @functools.lru_cache(maxsize=16)
@@ -330,6 +339,8 @@ class _Job:  # pylint: disable=too-many-instance-attributes
                     tuple(range(first, first + len(controls))),
                     # Only the original song can be mono; the singer's stems are stereo
                     mono=audio_input == 0 and self.info.channels == 1,
+                    # The stems come at Demucs's own rate, whatever the song's is
+                    rate=None if audio_input == 0 else STEM_RATE,
                 )
             )
         room = None
@@ -443,7 +454,11 @@ class _Job:  # pylint: disable=too-many-instance-attributes
         """The mix's loudness: remembered, or measured (saved too for fast encoders)."""
         stems = self.config.vocals == "center"
         key = cache.measurement_key(
-            self.song, self.config, self.options.trim, self.sample_rate
+            self.song,
+            self.config,
+            self.options.trim,
+            self.sample_rate,
+            self.options.timeline_start,
         )
         # Stems come from an AI model, so their measurement is never remembered
         measured = None if stems else cache.get(key)
@@ -604,9 +619,13 @@ def convert(  # pylint: disable=too-many-arguments,too-many-locals,too-many-bran
         cancel=cancel,
     )
     temporary_file = create_temporary_output(output_file)
-    scratch = Path(tempfile.mkdtemp(prefix="audio8d-"))
+    try:
+        scratch = Path(tempfile.mkdtemp(prefix="audio8d-"))
+    except OSError as exc:
+        raise ConversionError(f"I/O error during conversion: {exc}") from exc
     keep_temporary = False
     removed_to = None
+    warning = None
     LOG.info(
         "Converting %s -> %s [codec=%s, channels=%d, sample_rate=%s]",
         input_file,
@@ -645,7 +664,14 @@ def convert(  # pylint: disable=too-many-arguments,too-many-locals,too-many-bran
         else:
             commit_output(temporary_file, output_file, overwrite=overwrite)
             if options.replace_original:
-                removed_to = remove_original(input_file)
+                try:
+                    removed_to = remove_original(input_file)
+                except ConversionError as exc:
+                    # The 8D song is saved, so a stuck original is only worth a warning
+                    LOG.warning("%s", exc)
+                    warning = (
+                        f"{exc}. Your 8D song was saved; the original is still there."
+                    )
     except KeyboardInterrupt as exc:
         raise ConversionError("Conversion cancelled by user") from exc
     except OSError as exc:
@@ -665,7 +691,7 @@ def convert(  # pylint: disable=too-many-arguments,too-many-locals,too-many-bran
     if options.check:
         progress(STAGE_CHECK, 0.0)
         try:
-            quality = check_output(toolchain, output_file)
+            quality = check_output(toolchain, output_file, cancel=cancel)
         except ConversionError as exc:
             LOG.warning("Could not check the finished file: %s", exc)
         progress(STAGE_CHECK, 1.0)
@@ -680,6 +706,7 @@ def convert(  # pylint: disable=too-many-arguments,too-many-locals,too-many-bran
         bpm=job.bpm,
         beats_per_turn=job.beats,
         original_removed_to=removed_to,
+        warning=warning,
     )
 
 

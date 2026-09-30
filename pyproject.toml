@@ -45,7 +45,7 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-# The window's icon; FFmpeg itself lives in bin, outside the package
+# The window's icon; FFmpeg stays outside the package, in vendor
 audio8d = ["assets/*.ico"]
 
 [tool.pytest.ini_options]
@@ -86,7 +86,7 @@ no-docstring-rgx = "^(_|test_)"
 max-args = 8
 max-positional-arguments = 8
 max-attributes = 12
-# CustomTkinter widgets bring a deep tkinter class tree that no Audio8D class can shorten
+# CustomTkinter's deep tkinter class tree is inherited; no Audio8D class can shorten it
 ignored-parents = [
     "abc.ABC",
     "customtkinter.windows.ctk_toplevel.CTkToplevel",

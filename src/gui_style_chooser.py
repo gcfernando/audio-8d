@@ -19,10 +19,13 @@ from .gui_widgets import (
     ACCENT,
     ACCENT_TEXT,
     BORDER,
+    CONTROL_HEIGHT,
     INK,
+    PANEL_RADIUS,
     SUCCESS,
     SURFACE,
     TEXT_DIM,
+    TOOL_HEIGHT,
     button,
     hint,
     shade,
@@ -41,7 +44,7 @@ class _StyleCard(ctk.CTkFrame):
     def __init__(self, master: tk.Misc, chooser: "StyleChooser", preset: Preset):
         """Draw the card; clicking anywhere on it selects it."""
         super().__init__(
-            master, fg_color=SURFACE, corner_radius=10, border_width=1,
+            master, fg_color=SURFACE, corner_radius=PANEL_RADIUS, border_width=1,
             border_color=BORDER,
         )  # fmt: skip
         self.preset = preset
@@ -51,8 +54,7 @@ class _StyleCard(ctk.CTkFrame):
         guide = guide_for(preset)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
-        # Plain Tk labels and frames: each is one window instead of two, so the
-        # dialog appears noticeably faster (the chooser is rebuilt on a theme change)
+        # Plain Tk: one window per widget, not two, so opening and re-theming is quicker
         back = shade(SURFACE)
         head = tk.Frame(self, bg=back)
         head.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 0))
@@ -81,7 +83,7 @@ class _StyleCard(ctk.CTkFrame):
             "Preview",
             lambda: chooser.preview(preset),
             width=120,
-            height=30,
+            height=TOOL_HEIGHT,
             tooltip="Listen to the selected song with this style; nothing is changed",
         )
         self.preview.pack(side="left", padx=(0, 6))
@@ -92,14 +94,23 @@ class _StyleCard(ctk.CTkFrame):
             lambda: chooser.pick_and_apply(preset.name),
             kind="accent",
             width=100,
-            height=30,
+            height=TOOL_HEIGHT,
             tooltip="Use this style for every song that follows the default",
         ).pack(side="left")
+        # The words wrap to the card's own width, whatever the size setting
+        self.bind("<Configure>", self._wrap, add=True)
         # Clicking anywhere on the card selects it (its frames and its words)
         for frame in (self, head):
             frame.bind("<Button-1>", lambda _e: chooser.select(preset.name))
         for label in (self.name, self.purpose, self.good, self.marks):
             label.bind("<Button-1>", lambda _e: chooser.select(preset.name))
+
+    def _wrap(self, event: tk.Event) -> None:
+        """Wrap the description lines inside the card's padding."""
+        room = max(120, event.width - round(32 * self._get_widget_scaling()))
+        for label in (self.purpose, self.good):
+            if int(label.cget("wraplength")) != room:
+                label.configure(wraplength=room)
 
     @staticmethod
     def _label(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -153,15 +164,20 @@ class StyleChooser(Modal):
         self.note = hint(self.footer, "", margin=420)
         self.note.grid(row=0, column=0, sticky="ew")
         self.stop_preview = button(
-            self.footer, "stop", "Stop", app.stop_playing, width=90, height=34
+            self.footer,
+            "stop",
+            "Stop",
+            app.stop_playing,
+            width=90,
+            height=CONTROL_HEIGHT,
         )
         self.cancel_button = button(
-            self.footer, "", "Cancel", self.cancel, width=110, height=34
+            self.footer, "", "Cancel", self.cancel, width=110, height=CONTROL_HEIGHT
         )
         self.cancel_button.grid(row=0, column=2, padx=(8, 0))
         self.apply_button = button(
             self.footer, "check", "Apply", self.apply, kind="primary", width=130,
-            height=34,
+            height=CONTROL_HEIGHT,
         )  # fmt: skip
         self.apply_button.grid(row=0, column=3, padx=(8, 0))
         for key in ("<Left>", "<Up>"):

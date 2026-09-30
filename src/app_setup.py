@@ -3,6 +3,7 @@
 
 import logging
 import threading
+import tkinter as tk
 import webbrowser
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from .ffmpeg import (
 from .gui_dialogs import (
     Dialog,
 )
-from .gui_model import apply_output_defaults, output_defaults
+from .gui_model import apply_output_defaults, gui_words, output_defaults
 from .health import HealthReport, addon_items, check_environment
 from .library import (
     READY,
@@ -221,6 +222,10 @@ class SetupMixin(AppBase):
 
     def _addon_work(self, kind: str, python: Path | None) -> None:
         """Install, repair or uninstall on a helper thread; results come as events."""
+        # Asked twice (e.g. two clicks while a question was open): one job at a time
+        settings_page = self.pages.get("settings")
+        if settings_page is not None and settings_page.addon.installing:
+            return
         self.addon_cancel.clear()
         self.live("settings").addon.work_started(kind)  # type: ignore[attr-defined]
 
@@ -296,13 +301,18 @@ class SetupMixin(AppBase):
 
     def _link_failed(self, url: str) -> None:
         """The browser couldn't be started: show the address to copy instead."""
-        self.clipboard_clear()
-        self.clipboard_append(url)
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(url)
+            copied = "The address has been copied, so you can paste it"
+        except tk.TclError as exc:
+            LOG.warning("Could not copy %s: %s", url, exc)
+            copied = "You can type this address"
         Dialog(
             self,
             "The browser didn't open",
-            "Audio8D couldn't start your web browser. The address has been copied, "
-            f"so you can paste it into any browser:\n\n{url}",
+            f"Audio8D couldn't start your web browser. {copied} into any "
+            f"browser:\n\n{url}",
             [("OK", "ok")],
             icon="info",
         )
@@ -383,6 +393,9 @@ class SetupMixin(AppBase):
         self.live("songs").table.paint()  # type: ignore[attr-defined]
         self.live("styles_step").table.paint()  # type: ignore[attr-defined]
         self.live("review").results.paint()  # type: ignore[attr-defined]
+        plan = getattr(self.live("review"), "plan_table", None)
+        if plan is not None:
+            plan.paint()
 
     def check_tools(self) -> None:
         """Test the FFmpeg and FFprobe in use, in the background."""
@@ -390,7 +403,7 @@ class SetupMixin(AppBase):
 
         def work() -> None:
             results = {name: check_tool(name, path) for name, path in paths.items()}
-            self.events.put(("tools-tested", results, None))
+            self.events.put(("tools-tested", results, None, True))
 
         threading.Thread(target=work, name="tool-check", daemon=True).start()
 
@@ -406,12 +419,24 @@ class SetupMixin(AppBase):
         if waiting:
             self._read(waiting)
 
-    def _tools_tested(self, results: dict, then: object) -> None:
-        """The tool test finished: remember any problem for the steps to show."""
+    def _tools_tested(self, results: dict, then: object, in_use: bool) -> None:
+        """A tool test finished; only the tools in use count for the steps."""
+        self.live("settings").tested(results, then)  # type: ignore[attr-defined]
+        if in_use:
+            self.tools_in_use(results)
+
+    def _tools_missing(self, event: tuple) -> None:
+        """Songs couldn't be read for want of FFmpeg or FFprobe."""
+        self.tools_problem = gui_words(event[1])
+        self.status_text.configure(text="FFmpeg is needed to read the songs.")
+        self.toast("FFmpeg or FFprobe is missing: open Settings", "error")
+        self.refresh_nav()
+
+    def tools_in_use(self, results: dict) -> None:
+        """Remember how the tools in use did, for the steps to show any problem."""
         bad = [check.problem for check in results.values() if not check.ok]
         self.tools_problem = (
             "FFmpeg or FFprobe isn't working: " + " ".join(bad) if bad else None
         )
         self.tool_checks = results
-        self.live("settings").tested(results, then)  # type: ignore[attr-defined]
         self.refresh_nav()

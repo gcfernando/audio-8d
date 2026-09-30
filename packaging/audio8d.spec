@@ -1,6 +1,6 @@
 # Developed by ::> Gehan Fernando
 
-# Two programs (window and terminal) sharing one folder of bundled files; run via build_release.py
+# Window and terminal programs sharing one bundled folder; built by build_release.py
 
 import os
 import sys
@@ -10,8 +10,10 @@ from PyInstaller.utils.hooks import collect_data_files
 
 ROOT = Path(SPECPATH).parent
 ICON = str(ROOT / "src" / "assets" / "audio8d.ico")
-# CustomTkinter's themes and fonts, and Audio8D's own icon
+# CustomTkinter's themes and fonts, and Audio8D's icon
 DATAS = collect_data_files("customtkinter") + [(ICON, "audio8d/assets")]
+# macOS Finder litter that CustomTkinter ships; its PyInstaller hook adds it too
+JUNK = {".DS_Store"}
 # Big optional extras that Audio8D never needs in the standalone build
 EXCLUDES = ["demucs", "torch", "torchaudio", "numpy", "pytest", "IPython"]
 # build_release.py names the folder holding this system's ffmpeg and ffprobe
@@ -57,13 +59,18 @@ def program(built, name, console):
     )
 
 
+def without_junk(toc):
+    # Filtered here, after every hook has run, so no route can sneak the files back in
+    return [entry for entry in toc if Path(entry[0]).name not in JUNK]
+
+
 collected = COLLECT(
     program(window, "Audio8D", console=False),
     window.binaries,
-    window.datas,
+    without_junk(window.datas),
     program(terminal, "audio8d-cli", console=True),
     terminal.binaries,
-    terminal.datas,
+    without_junk(terminal.datas),
     upx=False,
     name="Audio8D",
 )

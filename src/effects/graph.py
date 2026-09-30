@@ -17,7 +17,13 @@ turned to the loudness target, and caught by a limiter.
 from dataclasses import dataclass
 
 from ..core.settings import EffectConfig
-from .head import BAND_SPLITS_HZ, DELAY_TAPS, tap_spacing_samples
+from .head import (
+    BAND_SPLITS_HZ,
+    DELAY_TAPS,
+    MAX_ITD_SECONDS,
+    tap_spacing_samples,
+    widest_itd,
+)
 from .levels import EXACT_MODE_MARGIN_DB
 from .reverb import room_for
 
@@ -31,6 +37,8 @@ _SIDE_HIGHPASS_HZ = 120.0
 _ROOM_HIGHPASS_HZ = 180.0
 # Removes a source's DC offset and inaudible rumble, which only waste headroom
 SUBSONIC_HZ = 5.0
+# How far the taps' widest ear gap may miss a real head's before a finer rate is used
+_ITD_TOLERANCE = 0.15
 
 # Every filter the graph can use; checked against the FFmpeg build up front
 GRAPH_FILTERS = frozenset(
@@ -61,6 +69,8 @@ class Source:
     control_inputs: tuple[int, ...]
     # A one-channel song, which is copied to both ears at its full level
     mono: bool = False
+    # Its own sample rate when it differs from the song's (the singer's stems)
+    rate: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,11 +100,13 @@ def _ear_sum(first: int, count: int) -> str:
 
 def timing_rate(sample_rate: int) -> int:
     """The lower rate the timing band runs at; it only holds sound below 1.2 kHz."""
-    return (
-        sample_rate // 4
-        if sample_rate % 4 == 0 and sample_rate >= 32000
-        else sample_rate
-    )
+    for divisor in (4, 2):
+        low = sample_rate // divisor
+        # Whole-sample taps at 8 or 16 kHz would stretch the ear gap to 0.875 ms
+        itd_error = abs(widest_itd(low) / MAX_ITD_SECONDS - 1.0)
+        if sample_rate % divisor == 0 and low >= 8000 and itd_error <= _ITD_TOLERANCE:
+            return low
+    return sample_rate
 
 
 def _weighted_stack(prefix: str, name: str, inputs: list[str], gains: str) -> str:
@@ -145,8 +157,9 @@ def _spatial_3d(
             high_gains,
         )
         + f"[{prefix}highmoved]",
-        f"[{prefix}lowmoved][{prefix}highmoved]amix=inputs=2:normalize=0"
-        f"[{prefix}moved]",
+        # The quarter-rate trip rounds the length up; the high bands keep it exact
+        f"[{prefix}highmoved][{prefix}lowmoved]amix=inputs=2:normalize=0:"
+        f"duration=first[{prefix}moved]",
     ]
     return lines
 
@@ -199,9 +212,8 @@ def _source_lines(
 ) -> list[str]:
     """Everything one source goes through, ending in [sNmoved] and [sNstill]."""
     prefix = f"s{index}"
-    resample = (
-        f",aresample={sample_rate}:filter_size=64" if source_rate != sample_rate else ""
-    )
+    rate = source.rate or source_rate
+    resample = f",aresample={sample_rate}:filter_size=64" if rate != sample_rate else ""
     outputs = [f"{prefix}in", f"{prefix}side"] + (
         [f"{prefix}room"] if with_room else []
     )
@@ -286,9 +298,10 @@ def limiter_stage(ceiling: float, sample_rate: int) -> str:
     if factor == 1:
         return limiter
     fast = sample_rate * factor
+    # Coming back down lifts a few peaks ~0.5 dB, so a last pass holds the ceiling
     return (
         f"aresample={fast}:filter_size=64,{limiter},"
-        f"aresample={sample_rate}:filter_size=64"
+        f"aresample={sample_rate}:filter_size=64,{limiter}"
     )
 
 

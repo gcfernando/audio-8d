@@ -45,17 +45,21 @@ from .gui_style_save import check_name, checked_style, taken_names
 from .gui_widgets import (
     ACCENT_TEXT,
     DANGER,
+    PANEL_RADIUS,
     SUCCESS,
     SURFACE_ALT,
     TEXT_DIM,
+    TOOL_HEIGHT,
     WARNING,
     Card,
     Icons,
     Page,
     button,
     fit_width,
+    flow,
     font,
     hint,
+    mark_entry,
 )
 from .style_creator import (
     MOVEMENT_CHOICES,
@@ -223,16 +227,17 @@ class YourStylesPage(Page):  # pylint: disable=too-many-instance-attributes
         )
         for row, widget in enumerate(fields):
             widget.grid(row=row, column=0, sticky="ew", pady=5)
-        result = ctk.CTkFrame(body, fg_color=SURFACE_ALT, corner_radius=10)
+        # Untinted like every other card; its heading sets the result apart
+        result = ctk.CTkFrame(body, fg_color="transparent")
         result.grid(row=len(fields), column=0, sticky="ew", pady=(10, 4))
         result.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(result, text="Your style", font=font(13, "bold"), anchor="w").grid(
-            row=0, column=0, sticky="ew", padx=14, pady=(10, 0)
+            row=0, column=0, sticky="ew", padx=6
         )
         self.result = ctk.CTkLabel(
             result, text="", font=font(12), anchor="w", justify="left"
         )
-        self.result.grid(row=1, column=0, sticky="ew", padx=14, pady=(2, 10))
+        self.result.grid(row=1, column=0, sticky="ew", padx=6, pady=(2, 0))
         self.checks = ctk.CTkFrame(body, fg_color="transparent")
         self.checks.grid(row=len(fields) + 1, column=0, sticky="ew")
         self.checks.grid_columnconfigure(0, weight=1)
@@ -391,7 +396,7 @@ class YourStylesPage(Page):  # pylint: disable=too-many-instance-attributes
         """Check a new style fully, offer to improve it, then save it."""
         name, problem = self.check_name(field.entry.get())
         if name is None:
-            field.entry.configure(border_color=DANGER)
+            mark_entry(field.entry, True)
             field.explain(problem or "Type a name first.", DANGER)
             return False
         checked = checked_style(
@@ -454,7 +459,7 @@ class YourStylesPage(Page):  # pylint: disable=too-many-instance-attributes
             "Import a style…",
             self._import,
             width=190,
-            height=32,
+            height=TOOL_HEIGHT,
             tooltip="Add a style from a file exported by Audio8D",
         ).grid(row=0, column=1, padx=(10, 0))
         for index, preset in enumerate(mine, start=1):
@@ -462,7 +467,7 @@ class YourStylesPage(Page):  # pylint: disable=too-many-instance-attributes
 
     def _saved_row(self, body: ctk.CTkFrame, index: int, preset: Preset) -> None:
         """One saved style: its name and description, then its buttons."""
-        row = ctk.CTkFrame(body, fg_color=SURFACE_ALT, corner_radius=10)
+        row = ctk.CTkFrame(body, fg_color=SURFACE_ALT, corner_radius=PANEL_RADIUS)
         row.grid(row=index, column=0, sticky="ew", pady=3)
         row.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
@@ -479,27 +484,24 @@ class YourStylesPage(Page):  # pylint: disable=too-many-instance-attributes
         title.grid(row=0, column=1, sticky="ew", pady=(10, 0), padx=(0, 12))
         fit_width(title, row, 60)
         actions = ctk.CTkFrame(row, fg_color="transparent")
-        # Under the star as well, so six buttons fit the narrowest window at 125 %
+        # Under the star as well, and on two lines when even that is too narrow
         actions.grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(6, 10))
         name = preset.name
-        for key, (icon, text, command, kind) in enumerate(
-            (
-                (
-                    "check",
-                    "Use",
-                    lambda: self._use(name),
-                    "primary",
-                ),
-                ("styles", "Edit", lambda: self.app.edit_style(name), "outline"),
-                ("save", "Rename", lambda: self._rename(name), "outline"),
-                ("add", "Duplicate", lambda: self._duplicate(name), "outline"),
-                ("open", "Export", lambda: self._export(name), "outline"),
+        parts = [
+            button(
+                actions, icon, text, command, kind=kind, width=80, height=TOOL_HEIGHT
+            )
+            for icon, text, command, kind in (
+                # Repeated on every row, so the lighter commit look, not a filled one
+                ("check", "Use", lambda: self._use(name), "accent"),
+                ("styles", "Edit…", lambda: self.app.edit_style(name), "outline"),
+                ("save", "Rename…", lambda: self._rename(name), "outline"),
+                ("add", "Duplicate…", lambda: self._duplicate(name), "outline"),
+                ("open", "Export…", lambda: self._export(name), "outline"),
                 ("delete", "Delete", lambda: self._delete(name), "outline"),
             )
-        ):
-            button(actions, icon, text, command, kind=kind, width=80, height=32).grid(
-                row=0, column=key, padx=(0, 4)
-            )
+        ]
+        flow(actions, parts, gap=4, line_gap=4)
 
     def _failed(self, title: str, error: Audio8DError) -> None:
         """Explain a style operation that couldn't be done; nothing was changed."""
@@ -639,4 +641,4 @@ class YourStylesPage(Page):  # pylint: disable=too-many-instance-attributes
             moved = self.app.reload_styles()
             songs = f"{moved} song{'s' if moved != 1 else ''}"
             extra = f"; {songs} now use the style for all songs" if moved else ""
-            Toast(self.app, f"Deleted '{name}'{extra}")
+            Toast(self.app, f"Deleted '{name}'{extra}", "ok")

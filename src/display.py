@@ -653,25 +653,62 @@ def show_beat(painter: Painter, result: ConversionResult) -> None:
     )
 
 
-def show_loudness(painter: Painter, plan: LoudnessPlan) -> None:
-    """Explain the loudness pass: what was measured, what changed, where it landed."""
+# Further than this from the target is worth telling the user about
+_TARGET_MISS_LU = 0.5
+
+
+def show_loudness(
+    painter: Painter, plan: LoudnessPlan, report: QualityReport | None = None
+) -> None:
+    """Explain the loudness pass: what was measured, what changed, where it landed.
+
+    With the after-check's report the landing is the file's measured loudness;
+    without it only the aim is known, since the limiter can pull the song lower.
+    """
     measured = plan.measured
     direction = "up" if plan.gain_db >= 0 else "down"
     reused = " (remembered)" if plan.cached else ""
+    landing = (
+        f"{report.integrated_lufs:.1f} LUFS (checked)"
+        if report is not None
+        else f"aims for {plan.expected_lufs:.1f} LUFS"
+    )
     painter.line(
         "  "
         + painter.paint("Loudness:", "bold", "green")
         + painter.paint(
             f" measured {measured.integrated_lufs:.1f} LUFS{reused}, turned {direction}"
-            f" {abs(plan.gain_db):.1f} dB  ->  about {plan.expected_lufs:.1f} LUFS",
+            f" {abs(plan.gain_db):.1f} dB  ->  {landing}",
             "green",
         )
     )
+    if plan.silent:
+        # Silence has no loudness to reach, so there is nothing more to explain
+        return
     if plan.held_back:
         painter.line(
             painter.paint(
                 f"  Kept below {plan.target_lufs:g} so the loudest moments are not "
                 "squashed. (--exact-loudness would force it.)",
+                "dim",
+            )
+        )
+    elif report is not None and (
+        report.integrated_lufs < plan.target_lufs - _TARGET_MISS_LU
+    ):
+        painter.line(
+            painter.paint(
+                "  Holding the loudest peaks down left it "
+                f"{plan.target_lufs - report.integrated_lufs:.1f} LU under "
+                f"{plan.target_lufs:g}; a quieter target keeps more punch.",
+                "yellow",
+            )
+        )
+    elif plan.exact and report is None:
+        painter.line(
+            painter.paint(
+                "  The loudest peaks are shaved to get there; heavy shaving can "
+                "leave it a little quieter.",
                 "dim",
             )
         )
@@ -726,7 +763,7 @@ def show_result(painter: Painter, result: ConversionResult, seconds: float) -> N
     show_done(painter, result.output, seconds)
     show_beat(painter, result)
     if result.loudness is not None:
-        show_loudness(painter, result.loudness)
+        show_loudness(painter, result.loudness, result.quality)
     if result.quality is not None:
         show_quality(painter, result.quality)
 

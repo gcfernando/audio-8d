@@ -28,7 +28,7 @@ from src.effects.head import (
     pan_gains,
     tap_spacing_samples,
 )
-from src.effects.levels import PEAK_ALLOWANCE_DB
+from src.effects.levels import EXACT_MODE_MARGIN_DB, PEAK_ALLOWANCE_DB
 from src.effects.motion import (
     Position,
     fade_factor,
@@ -220,7 +220,12 @@ def test_graph_keeps_the_bass_in_the_middle_and_ends_in_a_limiter() -> None:
     assert "afir" in graph
     # The limiter runs at twice the rate so peaks between samples are caught too
     assert "aresample=88200:filter_size=64,alimiter=limit=" in graph
-    assert graph.endswith("latency=true,aresample=44100:filter_size=64[out]")
+    main = graph.split("aresample=88200:filter_size=64,")[1].split(",aresample")[0]
+    # No loudness goal on a lossy file: the config's ceiling less the lossy margin
+    ceiling = EffectConfig().limiter_ceiling * 10 ** (-EXACT_MODE_MARGIN_DB / 20)
+    # A guard with the very same ceiling ends the chain, back at the song's own rate
+    assert main.startswith(f"alimiter=limit={ceiling:.4f}:")
+    assert graph.endswith(f"latency=true,aresample=44100:filter_size=64,{main}[out]")
     # Only that last step changes the rate: a 44.1 kHz song is never resampled first
     assert graph.count("aresample=44100:filter_size=64") == 1
 

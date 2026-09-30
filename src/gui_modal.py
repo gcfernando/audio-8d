@@ -13,7 +13,7 @@ import tkinter as tk
 import customtkinter as ctk
 
 from .gui_dialogs import grab_when_shown, show_centered, use_app_icon
-from .gui_widgets import BORDER, SURFACE, SURFACE_ALT, font, hint
+from .gui_widgets import BORDER, PANEL_RADIUS, SURFACE, font, hint
 
 
 class Modal(ctk.CTkToplevel):
@@ -43,8 +43,9 @@ class Modal(ctk.CTkToplevel):
         # A fixed wrap: fitting to the toplevel would react to every child's resize
         self.subheading = hint(self, "", size=13, wrap=size[0] - 60)
         self.subheading.grid(row=1, column=0, sticky="ew", padx=24, pady=(2, 10))
+        # White like a card, so choices and lists inside keep their grey fill
         self.body = ctk.CTkScrollableFrame(
-            self, fg_color=SURFACE_ALT, corner_radius=10, border_width=1,
+            self, fg_color=SURFACE, corner_radius=PANEL_RADIUS, border_width=1,
             border_color=BORDER,
         )  # fmt: skip
         self.body.grid(row=2, column=0, sticky="nsew", padx=20)

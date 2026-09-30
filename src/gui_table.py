@@ -16,30 +16,86 @@ from typing import Literal
 import customtkinter as ctk
 
 from .gui_widgets import (
+    ACCENT,
     ACCENT_SOFT,
     ACCENT_TEXT,
     BORDER,
     DANGER,
     FOCUS,
+    INK,
     SURFACE,
     SURFACE_ALT,
     TEXT_DIM,
     shade,
-    style_tables,
 )
 
 GROUP_PREFIX = "group:"
 
 
+def style_tables(root: tk.Misc) -> tuple[str, int]:
+    """Give Tk's table (ttk.Treeview) the window's colours; returns its font."""
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    bg, ink, dim = shade(SURFACE), shade(INK), shade(TEXT_DIM)
+    head, line = shade(SURFACE_ALT), shade(BORDER)
+    chosen, chosen_ink = shade(ACCENT_SOFT), shade(INK)
+    scaling = ctk.ScalingTracker.get_widget_scaling(root)
+    row_height = int(30 * scaling)
+    size = max(9, round(10 * scaling))
+    style.configure(
+        "Audio8D.Treeview",
+        background=bg,
+        fieldbackground=bg,
+        foreground=ink,
+        bordercolor=line,
+        lightcolor=line,
+        darkcolor=line,
+        rowheight=row_height,
+        font=("Segoe UI", size),
+        borderwidth=1,
+        relief="flat",
+    )
+    style.map(
+        "Audio8D.Treeview",
+        background=[("selected", "focus", shade(ACCENT)), ("selected", chosen)],
+        foreground=[("selected", "focus", "#FFFFFF"), ("selected", chosen_ink)],
+    )
+    style.configure(
+        "Audio8D.Treeview.Heading",
+        background=head,
+        foreground=dim,
+        bordercolor=line,
+        lightcolor=head,
+        darkcolor=head,
+        relief="flat",
+        font=("Segoe UI", size, "bold"),
+        padding=(8, int(6 * scaling)),
+    )
+    style.map(
+        "Audio8D.Treeview.Heading",
+        background=[("active", shade(ACCENT_SOFT))],
+    )
+    style.layout("Audio8D.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+    return ("Segoe UI", size)
+
+
 @dataclass(frozen=True, slots=True)
 class Column:
-    """One column: its key, heading, width in pixels, and alignment."""
+    """One column: its key, heading, width in pixels, and alignment.
+
+    least is the narrowest it may get in a narrow window (0: it shrinks like
+    the others), for a column whose words matter more than the rest.
+    """
 
     key: str
     heading: str
     width: int
     anchor: Literal["w", "center", "e"] = "w"
     stretch: bool = False
+    least: int = 0
 
 
 # One table row: (row id, the values in column order, tags such as 'own')
@@ -97,7 +153,8 @@ class SongTable(ctk.CTkFrame):
                 width=int(column.width * scale),
                 minwidth=int(60 * scale),
                 anchor=column.anchor,
-                stretch=column.stretch,
+                # Widths are shared out by _fit_columns, never by Tk itself
+                stretch=False,
             )
         scrollbar = ctk.CTkScrollbar(self, command=self.tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 2), pady=4)
@@ -112,19 +169,61 @@ class SongTable(ctk.CTkFrame):
         self.tree.bind("<MouseWheel>", self._wheel)
         self.tree.bind("<FocusIn>", lambda _e: self._focus_ring(True), add="+")
         self.tree.bind("<FocusOut>", lambda _e: self._focus_ring(False), add="+")
+        self.tree.bind("<Configure>", self._fit_columns, add="+")
+        self._fitted_to = 0
         self._groups: dict[str, list[str]] = {}
         self._quiet = False
 
     # ------------------------------------------------------------ looks
 
+    def _fit_columns(self, event: tk.Event) -> None:
+        """Share the table's width out: spare room to the wide columns, a lack to all.
+
+        Tk would otherwise take a lack only from the stretching columns, which
+        squeezed the song names to a few letters in a narrow window.
+        """
+        room = event.width - 4
+        if room <= 0 or room == self._fitted_to:
+            return
+        self._fitted_to = room
+        scale = ctk.ScalingTracker.get_widget_scaling(self)
+        wanted = [column.width * scale for column in self.columns]
+        total = sum(wanted)
+        stretching = sum(1 for column in self.columns if column.stretch)
+        if room >= total and stretching:
+            extra = (room - total) / stretching
+            widths = [
+                width + (extra if column.stretch else 0)
+                for width, column in zip(wanted, self.columns, strict=True)
+            ]
+        else:
+            widths = self._shrunk(wanted, room, scale)
+        for column, width in zip(self.columns, widths, strict=True):
+            self.tree.column(column.key, width=max(int(60 * scale), int(width)))
+
+    def _shrunk(self, wanted: list[float], room: float, scale: float) -> list[float]:
+        """Widths that fit room: each column keeps its least, the rest share alike."""
+        least = [column.least * scale for column in self.columns]
+        kept = [
+            w * room / sum(wanted) < low for w, low in zip(wanted, least, strict=True)
+        ]
+        left = room - sum(low for low, keep in zip(least, kept, strict=True) if keep)
+        others = sum(w for w, keep in zip(wanted, kept, strict=True) if not keep) or 1
+        return [
+            low if keep else w * max(left, 0) / others
+            for w, low, keep in zip(wanted, least, kept, strict=True)
+        ]
+
     def paint(self) -> None:
         """Apply the current theme's colours (call again after a theme change)."""
-        style_tables(self)
+        family, size = style_tables(self)
         self.tree.tag_configure("group", background=shade(SURFACE_ALT))
         self.tree.tag_configure("group", foreground=shade(ACCENT_TEXT))
         self.tree.tag_configure("problem", foreground=shade(DANGER))
         self.tree.tag_configure("muted", foreground=shade(TEXT_DIM))
         self.tree.tag_configure("current", background=shade(ACCENT_SOFT))
+        # A song with its own settings stands out in bold (its row also says Custom)
+        self.tree.tag_configure("own", font=(family, size, "bold"))
 
     def _focus_ring(self, on: bool) -> None:
         """A focus-coloured border while the keyboard is in the table."""

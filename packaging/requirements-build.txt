@@ -1,0 +1,7 @@
+# Developed by ::> Gehan Fernando
+# Exact versions bundled in the standalone package, as listed in THIRD-PARTY-NOTICES.md
+pyinstaller==6.22.3
+customtkinter==6.0.0
+darkdetect==0.8.0
+packaging==26.3
+pillow==12.3.0

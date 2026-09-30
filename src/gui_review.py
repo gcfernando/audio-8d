@@ -19,9 +19,13 @@ from .gui_widgets import (
     ACCENT,
     BORDER,
     DANGER,
+    HERO_HEIGHT,
     INK,
     SURFACE_ALT,
     TEXT_DIM,
+    TOOL_HEIGHT,
+    TOOL_WIDTH,
+    WHITE,
     Card,
     Notice,
     Page,
@@ -29,6 +33,7 @@ from .gui_widgets import (
     button,
     clear_children,
     fit_width,
+    flow,
     font,
     hint,
     icon_text,
@@ -67,7 +72,8 @@ class ConvertPage(Page):  # pylint: disable=too-many-instance-attributes
         Column("name", "Song", 260, stretch=True),
         Column("style", "Style", 120),
         Column("status", "Status", 150),
-        Column("result", "Result", 330, stretch=True),
+        # The loudness and tempo come first in it, so they need this much room
+        Column("result", "Result", 330, stretch=True, least=260),
     )
 
     def __init__(self, master: tk.Misc, app: "Audio8DApp") -> None:
@@ -122,7 +128,7 @@ class ConvertPage(Page):  # pylint: disable=too-many-instance-attributes
             app.run_convert,
             kind="primary",
             width=280,
-            height=44,
+            height=HERO_HEIGHT,
             tooltip="Make the 8D version of every song and save it (Ctrl+Enter)",
         )
         self.start.grid(row=0, column=0)
@@ -133,12 +139,13 @@ class ConvertPage(Page):  # pylint: disable=too-many-instance-attributes
             app.stop,
             kind="danger",
             width=110,
-            height=40,
+            height=HERO_HEIGHT,
             tooltip="Stop after the current step; finished songs are kept (Esc)",
         )
         self.stop.grid(row=0, column=1, padx=8)
-        self.start_note = hint(actions, "", margin=420)
-        self.start_note.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+        # Under the buttons, so it has the card's width even at a large size
+        self.start_note = hint(actions, "", margin=40)
+        self.start_note.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
         progress = ctk.CTkFrame(body, fg_color="transparent")
         progress.grid(row=1, column=0, sticky="ew", pady=(14, 6))
         progress.grid_columnconfigure(1, weight=1)
@@ -158,39 +165,44 @@ class ConvertPage(Page):  # pylint: disable=too-many-instance-attributes
             tools, "Show only songs with a problem", "", lambda _on: self.show_results()
         )
         self.only_problems.help.grid_remove()
-        self.only_problems.pack(side="left")
-        self.retry = button(
-            tools,
-            "replay",
-            "Try failed songs again",
-            app.retry_failed,
-            width=250,
-            height=30,
+        self.only_problems.grid(row=0, column=0, sticky="w")
+        actions = ctk.CTkFrame(tools, fg_color="transparent")
+        actions.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.play_song = button(
+            actions,
+            "play",
+            "Play",
+            self._play_selected,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
         )
-        self.retry.pack(side="right", padx=2)
-        self.copy = button(
-            tools,
-            "copy",
-            "Copy problem list",
-            self._copy_problems,
-            width=180,
-            height=30,
-        )
-        self.copy.pack(side="right", padx=2)
         self.open_folder = button(
-            tools,
+            actions,
             "open",
             "Open folder",
             self._open_folder,
-            width=140,
-            height=30,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
             tooltip="Open the folder of the selected (or first) new song",
         )
-        self.open_folder.pack(side="right", padx=2)
-        self.play_song = button(
-            tools, "play", "Play", self._play_selected, width=90, height=30
+        self.copy = button(
+            actions,
+            "copy",
+            "Copy problem list",
+            self._copy_problems,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
         )
-        self.play_song.pack(side="right", padx=2)
+        self.retry = button(
+            actions,
+            "replay",
+            "Try failed songs again",
+            app.retry_failed,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
+        )
+        # A toolbar like 'Your songs': it wraps onto a second line when narrow
+        flow(actions, (self.play_song, self.open_folder, self.copy, self.retry))
         self.results = SongTable(
             body,
             self.COLUMNS,
@@ -216,10 +228,10 @@ class ConvertPage(Page):  # pylint: disable=too-many-instance-attributes
         button(
             log_tools,
             "clear",
-            "Clear Logs",
+            "Clear log view",
             app.clear_log_view,
             width=130,
-            height=30,
+            height=TOOL_HEIGHT,
             tooltip="Empty this view. Saved log files are kept "
             "(delete those in Settings).",
         ).grid(row=0, column=0)
@@ -231,8 +243,8 @@ class ConvertPage(Page):  # pylint: disable=too-many-instance-attributes
         self.autoscroll.grid(row=0, column=1, padx=(10, 0))
         hint(
             log_tools,
-            "Clear Logs empties this view only; your saved log files are "
-            "kept (Settings, Logs).",
+            "Clear log view empties this view only; your saved log files are "
+            "kept (Settings, Logs and saved data).",
             margin=460,
         ).grid(row=0, column=2, sticky="ew", padx=(10, 0))
         self.log = ctk.CTkTextbox(
@@ -347,12 +359,18 @@ class ConvertPage(Page):  # pylint: disable=too-many-instance-attributes
         ]
         self.plan_table.show([("", rows)])
 
-    def show(self, _settings: GuiSettings) -> None:
-        """Rebuild the plan, the problems and the warnings."""
+    def show(
+        self, _settings: GuiSettings, found: list[tuple[str, str]] | None = None
+    ) -> None:
+        """Rebuild the plan, the problems and the warnings.
+
+        found is what find_problems() just said, when the caller already asked.
+        """
         app = self.app
         show_summary(self.summary.body, app)
         self._show_plan()
-        found = app.find_problems()
+        if found is None:
+            found = app.find_problems()
         heads_ups = app.heads_ups()
         self._show_notes(found, heads_ups)
         self._show_start(found)
@@ -405,7 +423,7 @@ class ConvertPage(Page):  # pylint: disable=too-many-instance-attributes
                 if count
                 else "Create songs",
                 16,
-                ("#FFFFFF", "#FFFFFF"),
+                WHITE,
             ),
         )
         if found:
@@ -499,4 +517,6 @@ class ConvertPage(Page):  # pylint: disable=too-many-instance-attributes
         ]
         self.clipboard_clear()
         self.clipboard_append("\n".join(lines))
-        self.app.toast(f"Copied {len(lines)} problem{'s' if len(lines) != 1 else ''}")
+        self.app.toast(
+            f"Copied {len(lines)} problem{'s' if len(lines) != 1 else ''}", "ok"
+        )

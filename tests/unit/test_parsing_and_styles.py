@@ -1,6 +1,7 @@
 # Developed by ::> Gehan Fernando
 """Checks times, keyframes, song picking, saved styles and speaker safety."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,34 @@ def test_keyframes_round_trip() -> None:
 
     assert frames == ((0.0, 10.0), (60.0, 6.0), (150.0, 10.0))
     assert parse_keyframes(format_keyframes(frames)) == frames
+
+
+@pytest.mark.parametrize(
+    ("text", "saved"),
+    [
+        ("0=8, 0:10.6=4", "0:00=8, 0:10.6=4"),
+        ("1:05.25=6", "1:05.25=6"),
+        ("59.999=3", "0:59.999=3"),
+        ("1:02:03.5=2", "1:02:03.5=2"),
+    ],
+)
+def test_keyframes_keep_parts_of_a_second(text: str, saved: str) -> None:
+    frames = parse_keyframes(text)
+
+    assert format_keyframes(frames) == saved
+    assert parse_keyframes(format_keyframes(frames)) == frames
+    # Shown times are still whole seconds, like a music player
+    assert format_time(10.6) == "0:11"
+
+
+def test_a_saved_style_keeps_fractional_curve_times(tmp_path: Path) -> None:
+    frames = parse_keyframes("0=8, 0:10.6=4")
+    config = dataclasses.replace(PRESETS["studio"].config, speed_curve=frames)
+    file = tmp_path / "presets.toml"
+
+    save_user_preset("Curvy", config, based_on="studio", path=file)
+
+    assert load_user_presets(file)["Curvy"].config.speed_curve == frames
 
 
 @pytest.mark.parametrize("text", ["fast", "1:00", "0=abc", " , "])

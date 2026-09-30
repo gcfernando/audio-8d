@@ -198,7 +198,7 @@ def test_loudness_report_explains_a_held_back_song() -> None:
     display.show_loudness(display.Painter(stream), _plan(9.99, exact=False))
     shown = stream.getvalue()
 
-    assert "measured -27.4 LUFS, turned up 10.0 dB  ->  about -17.4 LUFS" in shown
+    assert "measured -27.4 LUFS, turned up 10.0 dB  ->  aims for -17.4 LUFS" in shown
     assert "not squashed" in shown
 
 
@@ -206,8 +206,9 @@ def test_loudness_report_for_exact_mode() -> None:
     stream = io.StringIO()
     display.show_loudness(display.Painter(stream), _plan(13.4, exact=True))
 
-    assert "about -14.0 LUFS" in stream.getvalue()
-    assert "shaved lightly" in stream.getvalue()
+    # Without the after-check only the aim is known, never a promise
+    assert "aims for -14.0 LUFS" in stream.getvalue()
+    assert "shaved to get there" in stream.getvalue()
 
 
 def test_panel_shows_the_source_and_good_to_know_facts() -> None:

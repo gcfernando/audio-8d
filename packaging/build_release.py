@@ -1,15 +1,14 @@
 # Developed by ::> Gehan Fernando
 """Build the standalone Audio8D package for this computer's system, as a ZIP in bin.
 
-    python packaging/build_release.py            (from the 8D folder)
+    python packaging/build_release.py            (from the repository folder)
 
 It makes a private build environment, bundles FFmpeg 7 or newer, builds the
 window and terminal programs with PyInstaller, zips the result as
 bin/Audio8D-<version>-<system>-<processor>.zip, then unpacks that ZIP to a
 folder with spaces in its name and checks it runs there with no Python on the
 PATH. PyInstaller can't build for another system, so run this once on
-Windows, once on Linux and once on macOS (or let the GitHub workflow do it)
-to get all three ZIPs.
+Windows, once on Linux and once on macOS to get all three ZIPs.
 
 Only the standard library is used, so any Python 3.10 or newer can run it.
 """
@@ -55,6 +54,8 @@ MAC_FFMPEG = {
 }
 # What travels with the programs in every package
 EXTRAS = ("README.md", "THIRD-PARTY-NOTICES.md", "licenses")
+# The pinned build tools and bundled libraries, matching THIRD-PARTY-NOTICES.md
+REQUIREMENTS = ROOT / "packaging" / "requirements-build.txt"
 
 
 class BuildError(RuntimeError):
@@ -142,7 +143,8 @@ def build_python(tag: str) -> Path:
             "install",
             "--quiet",
             f"{ROOT}[gui]",
-            "pyinstaller>=6.0",
+            "--requirement",
+            str(REQUIREMENTS),
         ]
     )
     # PyInstaller can't follow an editable install, so always copy in the current code
@@ -426,7 +428,7 @@ def check_contents(archive: Path) -> None:
     """The ZIP must not carry developer files."""
     with zipfile.ZipFile(archive) as bundle:
         names = bundle.namelist()
-    pattern = r"(^|/)(\.venv|venv|\.git|__pycache__|\.pytest_cache)(/|$)"
+    pattern = r"(^|/)(\.venv|venv|\.git|__pycache__|\.pytest_cache|\.DS_Store)(/|$)"
     unwanted = [name for name in names if re.search(pattern, name)]
     if unwanted:
         raise BuildError(f"The ZIP holds developer files: {unwanted[:5]}")
@@ -437,7 +439,7 @@ def check_package(archive: Path, tag: str) -> None:
     say(f"Checking {archive.name} as a user would run it")
     check_contents(archive)
     with tempfile.TemporaryDirectory(prefix="audio8d check ") as temp:
-        outside = Path(temp)  # runs from outside the package and the repository
+        outside = Path(temp)  # Far from the package and the repo, so nothing leaks in
         folder = extract(archive, outside / "unpacked here")
         cli = cli_in(folder, tag)
         if not cli.is_file():

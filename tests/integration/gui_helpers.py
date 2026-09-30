@@ -18,6 +18,8 @@ def pump(window, until, seconds: float = 90.0) -> None:
 def read(app, paths) -> None:
     """Add songs and wait until their details have been read."""
     app.add_paths(list(paths))
+    # Folders are looked through on a helper thread first
+    pump(app, lambda: not app.scans_waiting, 60)
     pump(app, lambda: all(t.state != "reading" for t in app.library.tracks), 60)
 
 

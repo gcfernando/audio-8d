@@ -27,13 +27,16 @@ from .addons import (
 from .core.locations import addon_dir
 from .gui_fields import (
     LearnMore,
+    browse_button,
 )
 from .gui_widgets import (
     DANGER,
     INK,
+    PANEL_RADIUS,
     SUCCESS,
     SURFACE_ALT,
     TEXT_DIM,
+    TOOL_HEIGHT,
     WARNING,
     Badge,
     Card,
@@ -165,7 +168,7 @@ class HealthCard(Card):
                     "Fix it" if item.required else "Set it up",
                     lambda p=part: self.app.live("settings").reveal(p),
                     width=120,
-                    height=30,
+                    height=TOOL_HEIGHT,
                 ).grid(row=row, column=3, sticky="ne", padx=(8, 0), pady=6)
         technical = "\n".join(
             f"{item.name}: {STATE_WORDS[item.state]}. {item.detail}".strip()
@@ -186,31 +189,30 @@ class _PythonRow(ctk.CTkFrame):
 
     def __init__(self, master: tk.Misc, app: "Audio8DApp") -> None:
         """A path box with Browse, 'Use this Python' and 'Find automatically'."""
-        super().__init__(master, fg_color=SURFACE_ALT, corner_radius=10)
+        # Untinted like the rest of the card; its bold heading sets it apart
+        super().__init__(master, fg_color="transparent")
         self.app = app
         self.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             self, text="Python used to install it", font=font(13, "bold"), anchor="w"
-        ).grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 0))
-        self.state = hint(self, "", margin=60)
-        self.state.grid(row=1, column=0, sticky="ew", padx=14)
+        ).grid(row=0, column=0, sticky="ew")
+        self.state = hint(self, "", margin=40)
+        self.state.grid(row=1, column=0, sticky="ew")
         line = ctk.CTkFrame(self, fg_color="transparent")
-        line.grid(row=2, column=0, sticky="ew", padx=14, pady=(6, 0))
+        line.grid(row=2, column=0, sticky="ew", pady=(6, 0))
         line.grid_columnconfigure(0, weight=1)
         self.path = entry(line, "Found automatically (python.exe)", 360)
         self.path.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        button(line, "folder", "Browse…", self._browse, width=110, height=32).grid(
-            row=0, column=1
-        )
+        browse_button(line, self._browse).grid(row=0, column=1)
         actions = ctk.CTkFrame(self, fg_color="transparent")
-        actions.grid(row=3, column=0, sticky="w", padx=10, pady=(6, 10))
+        actions.grid(row=3, column=0, sticky="w", pady=(6, 0))
         button(
             actions,
             "check",
             "Use this Python",
             self._use_typed,
             width=170,
-            height=30,
+            height=TOOL_HEIGHT,
             tooltip="Run the Python in the box and use it to install the add-on",
         ).pack(side="left", padx=(0, 8))
         button(
@@ -219,7 +221,7 @@ class _PythonRow(ctk.CTkFrame):
             "Find automatically",
             lambda: app.use_python(None),
             width=190,
-            height=30,
+            height=TOOL_HEIGHT,
         ).pack(side="left", padx=(0, 8))
         self.download = button(
             actions,
@@ -228,7 +230,7 @@ class _PythonRow(ctk.CTkFrame):
             lambda: app.open_link(PYTHON_DOWNLOAD),
             kind="quiet",
             width=190,
-            height=30,
+            height=TOOL_HEIGHT,
         )
 
     def show(self, status: AddonStatus) -> None:
@@ -301,13 +303,14 @@ class AddonCard(Card):  # pylint: disable=too-many-instance-attributes
         for column in range(2):
             info.grid_columnconfigure(column, weight=1, uniform="addon")
         for index, (title, text) in enumerate(ADDON_INFO):
-            box = ctk.CTkFrame(info, fg_color=SURFACE_ALT, corner_radius=10)
+            box = ctk.CTkFrame(info, fg_color=SURFACE_ALT, corner_radius=PANEL_RADIUS)
             box.grid(row=index // 2, column=index % 2, sticky="nsew", padx=4, pady=4)
             box.grid_columnconfigure(0, weight=1)
             ctk.CTkLabel(box, text=title, font=font(13, "bold"), anchor="w").grid(
                 row=0, column=0, sticky="ew", padx=12, pady=(10, 0)
             )
-            hint(box, text, INK, wrap=380).grid(
+            # Wrapped to the box, which takes half the card whatever the window size
+            hint(box, text, INK, margin=24).grid(
                 row=1, column=0, sticky="ew", padx=12, pady=(2, 10)
             )
         self.python_row = _PythonRow(body, app)
@@ -339,7 +342,6 @@ class AddonCard(Card):  # pylint: disable=too-many-instance-attributes
             "delete",
             "Uninstall add-on",
             app.uninstall_addon,
-            kind="danger",
             width=200,
             tooltip="Asks first, then deletes the add-on folder",
         )

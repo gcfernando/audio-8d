@@ -15,13 +15,19 @@ from .gui_widgets import (
     ACCENT,
     ACCENT_TEXT,
     BORDER,
+    CARD_RADIUS,
+    SEARCH_WIDTH,
     SURFACE,
     TEXT_DIM,
+    TOOL_HEIGHT,
+    TOOL_WIDTH,
     Card,
     Icons,
     Page,
     button,
     entry,
+    fit_width,
+    flow,
     font,
     hint,
 )
@@ -54,82 +60,42 @@ class SongsPage(Page):
             "on the last step.",
         )
         self.app = app
-        drop = ctk.CTkFrame(
-            self,
-            fg_color=SURFACE,
-            corner_radius=12,
-            border_width=2,
-            border_color=BORDER,
-        )
-        self.add(drop, 2)
-        drop.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(
-            drop, text=Icons.glyph("drop"), font=Icons.font(30), text_color=ACCENT_TEXT
-        ).grid(row=0, column=0, rowspan=3, padx=(24, 16), pady=20)
-        ctk.CTkLabel(
-            drop, text="Drop songs or folders here", font=font(16, "bold"), anchor="w"
-        ).grid(row=0, column=1, sticky="sw", pady=(18, 0))
-        hint(
-            drop,
-            "MP3, FLAC, WAV, M4A, OGG, Opus, WMA, AIFF and the sound of videos. "
-            "FLAC or WAV give the best result.",
-            margin=470,
-        ).grid(row=1, column=1, sticky="new")
-        self.recursive = SwitchField(
-            drop,
-            "Include songs in sub-folders",
-            "",
-            app.set_recursive,
-        )
-        self.recursive.help.grid_remove()
-        self.recursive.grid(row=2, column=1, sticky="w", pady=(2, 14))
-        buttons = ctk.CTkFrame(drop, fg_color="transparent")
-        buttons.grid(row=0, column=2, rowspan=3, padx=20)
-        button(
-            buttons,
-            "add",
-            "Add songs",
-            app.ask_files,
-            kind="primary",
-            tooltip="Choose one or more song files (Ctrl+O)",
-        ).pack(side="left", padx=4)
-        button(
-            buttons,
-            "folder",
-            "Add folder",
-            app.ask_folder,
-            tooltip="Add every song in a folder (Ctrl+Shift+O)",
-        ).pack(side="left", padx=4)
+        self._build_drop()
 
         songs = Card(self, "Your songs")
         self.add(songs, 3)
         body = songs.body
+        # Laid out like 'Your songs' on step 2: status and search, then wrapping buttons
         top = ctk.CTkFrame(body, fg_color="transparent")
-        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.grid(row=0, column=0, sticky="ew")
         top.grid_columnconfigure(0, weight=1)
-        self.summary = ctk.CTkLabel(top, text="", font=font(13), anchor="w")
+        self.summary = ctk.CTkLabel(top, text="", font=font(12, "bold"), anchor="w")
         self.summary.grid(row=0, column=0, sticky="w")
-        self.search = entry(top, "Search songs, artists, albums…", 260)
-        self.search.grid(row=0, column=1, padx=(8, 0))
+        self.search = entry(top, "Search songs, artists, albums…", SEARCH_WIDTH)
+        self.search.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self.search.bind("<KeyRelease>", lambda _e: self.refresh())
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.grid(row=1, column=0, sticky="w", pady=(10, 8))
         self.remove = button(
-            top,
+            actions,
             "remove",
             "Remove selected",
             self._remove_selected,
-            width=170,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
             tooltip="Take the selected songs off the list (Delete). Files are "
             "not touched.",
         )
-        self.remove.grid(row=0, column=2, padx=(8, 0))
-        button(
-            top,
+        self.clear = button(
+            actions,
             "clear",
             "Clear list",
-            app.clear_songs,
-            width=120,
+            app.ask_clear_songs,
+            width=TOOL_WIDTH,
+            height=TOOL_HEIGHT,
             tooltip="Take every song off the list. Files are not touched.",
-        ).grid(row=0, column=3, padx=(8, 0))
+        )
+        flow(actions, (self.remove, self.clear))
         self.reading = ctk.CTkFrame(body, fg_color="transparent")
         self.reading.grid_columnconfigure(1, weight=1)
         self.reading_bar = ctk.CTkProgressBar(
@@ -146,7 +112,7 @@ class SongsPage(Page):
             "Stop reading",
             app.stop_reading,
             width=140,
-            height=28,
+            height=TOOL_HEIGHT,
             tooltip="Stop reading song details (Esc). Songs not read yet can still "
             "be converted; they just get the balanced default suggestion.",
         ).grid(row=0, column=2, padx=(8, 0))
@@ -157,7 +123,7 @@ class SongsPage(Page):
             on_select=self._selection_changed,
             label="Songs on the list",
         )
-        self.table.grid(row=2, column=0, sticky="nsew")
+        self.table.grid(row=3, column=0, sticky="nsew")
         self.table.tree.bind("<Delete>", lambda _e: self._remove_selected())
         self.empty = hint(
             body,
@@ -165,15 +131,75 @@ class SongsPage(Page):
             "songs. Audio8D reads each file's tags (artist, album, genre) to suggest "
             "a style on the next step.",
         )
-        self.empty.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        self.footer(4, None, "Next: choose sound", lambda: app.show_page("styles_step"))
+        self.empty.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        self.footer(5, None, "Next: choose sound", lambda: app.show_page("styles_step"))
         self.recursive.set(app.settings.recursive)
         self._selection_changed()
 
+    def _build_drop(self) -> None:
+        """The drop area: what can be added, the two Add buttons and sub-folders."""
+        drop = ctk.CTkFrame(
+            self,
+            fg_color=SURFACE,
+            corner_radius=CARD_RADIUS,
+            border_width=2,
+            border_color=BORDER,
+        )
+        self.add(drop, 2)
+        drop.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            drop, text=Icons.glyph("drop"), font=Icons.font(30), text_color=ACCENT_TEXT
+        ).grid(row=0, column=0, rowspan=3, padx=(24, 16), pady=20)
+        # Words, then the buttons under them, so nothing is cut in a narrow window
+        words = ctk.CTkFrame(drop, fg_color="transparent")
+        words.grid(row=0, column=1, sticky="ew", pady=(18, 4))
+        words.grid_columnconfigure(0, weight=1)
+        title = ctk.CTkLabel(
+            words,
+            text="Drop songs or folders here",
+            font=font(16, "bold"),
+            anchor="w",
+            justify="left",
+        )
+        title.grid(row=0, column=0, sticky="ew")
+        fit_width(title, words, 24)
+        hint(
+            words,
+            "MP3, FLAC, WAV, M4A, OGG, Opus, WMA, AIFF and the sound of videos. "
+            "FLAC or WAV give the best result.",
+            margin=24,
+        ).grid(row=1, column=0, sticky="ew")
+        self.recursive = SwitchField(
+            drop,
+            "Include songs in sub-folders",
+            "",
+            self.app.set_recursive,
+        )
+        self.recursive.help.grid_remove()
+        self.recursive.grid(row=2, column=1, sticky="w", pady=(4, 14))
+        buttons = ctk.CTkFrame(drop, fg_color="transparent")
+        buttons.grid(row=1, column=1, sticky="w", padx=(0, 20), pady=(6, 0))
+        button(
+            buttons,
+            "add",
+            "Add songs",
+            self.app.ask_files,
+            kind="primary",
+            tooltip="Choose one or more song files (Ctrl+O)",
+        ).pack(side="left", padx=(0, 8))
+        button(
+            buttons,
+            "folder",
+            "Add folder",
+            self.app.ask_folder,
+            tooltip="Add every song in a folder (Ctrl+Shift+O)",
+        ).pack(side="left")
+
     def _selection_changed(self) -> None:
-        """Remove is only possible with something selected."""
+        """Remove needs something selected, and Clear list something on the list."""
         count = len(self.table.selected())
         self.remove.configure(state="normal" if count else "disabled")
+        self.clear.configure(state="normal" if self.app.library.tracks else "disabled")
 
     def _remove_selected(self) -> None:
         """Take the selected songs off the list."""
@@ -237,7 +263,7 @@ class SongsPage(Page):
         reading = sum(1 for t in tracks if t.state not in (READY, UNREADABLE))
         bad = sum(1 for t in tracks if t.state == UNREADABLE)
         if not total:
-            text = "The list is empty."
+            text = "No songs yet"
         else:
             text = f"{total} song{'s' if total != 1 else ''} on the list"
             if bad:
@@ -247,6 +273,6 @@ class SongsPage(Page):
             done = total - reading
             self.reading_bar.set(done / total)
             self.reading_text.configure(text=f"Reading song details… {done} of {total}")
-            self.reading.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+            self.reading.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         else:
             self.reading.grid_remove()

@@ -549,6 +549,22 @@ def test_songs_that_would_share_a_name_get_their_own() -> None:
     assert name_clashes(settings, songs) == 0
 
 
+def test_a_new_file_never_takes_another_songs_name(tmp_path: Path) -> None:
+    settings = _settings()
+    settings.name_style, settings.originals = "original", "replace"
+    flac, mp3 = tmp_path / "a.flac", tmp_path / "a.mp3"
+    songs = [(flac, None), (mp3, None)]
+
+    items = items_for(settings, songs)
+
+    # a.flac would become a.mp3, which is the other song: it gets its own name
+    assert [(i.source, i.output.name) for i in items] == [
+        (flac, "a (2).mp3"),
+        (mp3, "a.mp3"),
+    ]
+    assert name_clashes(settings, songs) == 1
+
+
 def _problem(text: str) -> str:
     problem = destination_problem(text)
     assert problem is not None, text

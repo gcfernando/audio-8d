@@ -27,7 +27,7 @@ from .recommend import (
     recommend,
 )
 
-# A song's reading state
+# Where a song stands: still being read, ready to convert, or unreadable
 READING, READY, UNREADABLE = "reading", "ready", "unreadable"
 
 
