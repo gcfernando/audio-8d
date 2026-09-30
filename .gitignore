@@ -1,0 +1,26 @@
+# Developed by ::> Gehan Fernando
+# Python bytecode and build output
+__pycache__/
+*.py[cod]
+build/
+*.egg-info/
+
+# bin holds only the release ZIPs made by packaging/build_release.py (one per system)
+bin/*
+!bin/*.zip
+
+# Local environments and tool caches
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Hidden, half-made files from a conversion that was stopped
+.*.partial.*
+
+# Songs you convert here stay on your PC and are never uploaded
+*.mp3
+*.flac
+*.wav
+*.m4a
+*.opus

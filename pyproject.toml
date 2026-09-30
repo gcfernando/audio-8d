@@ -1,0 +1,109 @@
+# Developed by ::> Gehan Fernando
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "audio8d"
+version = "1.0.0"
+description = "Production-oriented 3D/8D audio converter powered by FFmpeg"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Gehan Fernando" }]
+dependencies = []
+
+[project.optional-dependencies]
+# Only the window needs these (Pillow draws its icons); the terminal app needs none
+gui = ["customtkinter>=5.2", "pillow>=9.0"]
+# Keeps the singer in the middle (--vocals center); large, as it brings PyTorch
+stems = ["demucs>=4.0", "numpy"]
+dev = [
+    "pylint>=3.3",
+    "pyright>=1.1",
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[project.scripts]
+audio8d = "audio8d.cli:main"
+
+[project.gui-scripts]
+# The window, without a console behind it
+audio8d-gui = "audio8d.gui:main"
+
+[tool.setuptools]
+# The src folder *is* the audio8d package, so map the import name straight onto it
+package-dir = {"audio8d" = "src"}
+# Add any new sub-folder of src here or it will be left out of installs
+packages = [
+    "audio8d",
+    "audio8d.analysis",
+    "audio8d.core",
+    "audio8d.effects",
+    "audio8d.ffmpeg",
+    "audio8d.files",
+]
+
+[tool.setuptools.package-data]
+# The window's icon; FFmpeg itself lives in bin, outside the package
+audio8d = ["assets/*.ico"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+# Lets tests import the working copy as `src`, installed or not
+pythonpath = ["."]
+
+[tool.ruff]
+# 88 matches Black and the pylint limit used in the editor
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# cli.py hands over to __main__.py before its package imports when run as a plain script
+"src/cli.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+# Installed code is called audio8d and tests import the folder as src; both are ours
+known-first-party = ["audio8d", "src"]
+
+[tool.pylint.main]
+# tests has no __init__.py, so its files are found by walking the folder
+recursive = true
+
+[tool.pylint.format]
+max-line-length = 88
+
+[tool.pylint.basic]
+# Test names already say what they check, so they do not need docstrings as well
+no-docstring-rgx = "^(_|test_)"
+
+[tool.pylint.design]
+# convert() and EffectConfig carry one value per user-facing setting
+max-args = 8
+max-positional-arguments = 8
+max-attributes = 12
+# CustomTkinter widgets bring a deep tkinter class tree that no Audio8D class can shorten
+ignored-parents = [
+    "abc.ABC",
+    "customtkinter.windows.ctk_toplevel.CTkToplevel",
+    "customtkinter.windows.ctk_tk.CTk",
+    "customtkinter.windows.widgets.appearance_mode.appearance_mode_base_class.CTkAppearanceModeBaseClass",
+    "customtkinter.windows.widgets.core_widget_classes.ctk_base_class.CTkBaseClass",
+    "customtkinter.windows.widgets.ctk_button.CTkButton",
+    "customtkinter.windows.widgets.ctk_frame.CTkFrame",
+    "customtkinter.windows.widgets.ctk_label.CTkLabel",
+    "customtkinter.windows.widgets.ctk_optionmenu.CTkOptionMenu",
+    "customtkinter.windows.widgets.ctk_scrollable_frame.CTkScrollableFrame",
+    "customtkinter.windows.widgets.scaling.scaling_base_class.CTkScalingBaseClass",
+    "tkinter.BaseWidget",
+    "tkinter.Frame",
+    "tkinter.Misc",
+    "tkinter.Tk",
+    "tkinter.Toplevel",
+    "tkinter.Widget",
+    "tkinter.Wm",
+]

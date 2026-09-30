@@ -1,0 +1,16 @@
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=(1, 0, 0, 0), prodvers=(1, 0, 0, 0)),
+  kids=[
+    StringFileInfo([StringTable("040904B0", [
+      StringStruct("CompanyName", "Gehan Fernando"),
+      StringStruct("FileDescription", "Audio8D - 3D music for headphones"),
+      StringStruct("FileVersion", "1.0.0"),
+      StringStruct("InternalName", "Audio8D"),
+      StringStruct("LegalCopyright", "Developed by Gehan Fernando"),
+      StringStruct("OriginalFilename", "Audio8D.exe"),
+      StringStruct("ProductName", "Audio8D"),
+      StringStruct("ProductVersion", "1.0.0"),
+    ])]),
+    VarFileInfo([VarStruct("Translation", [1033, 1200])]),
+  ],
+)

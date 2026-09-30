@@ -1,0 +1,2 @@
+vendor/ffmpeg/**/*.exe filter=lfs diff=lfs merge=lfs -text
+bin/*.zip filter=lfs diff=lfs merge=lfs -text
