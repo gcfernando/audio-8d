@@ -3,9 +3,9 @@
 
 <img src="docs/images/logo.png" alt="The Audio8D icon: white headphones on a purple-to-pink rounded square." width="120"/>
 
-# Audio8D
+# Audio8D — 8D Audio Converter for Windows and Linux
 
-### 🎧 Turn your songs into music that moves around your head.
+### 🎧 Desktop and command-line 8D audio converter for headphone listening.
 
 **Developed by Gehan Fernando**
 
