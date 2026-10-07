@@ -3,9 +3,9 @@
 
 <img src="docs/images/logo.png" alt="The Audio8D icon: white headphones on a purple-to-pink rounded square." width="120"/>
 
-# Audio8D — 8D Audio Converter for Windows and Linux
+# Audio8D — FFmpeg 8D Audio Converter for Windows and Linux
 
-### 🎧 Desktop and command-line 8D audio converter for headphone listening.
+### 🎧 A Python desktop and command-line tool for creating customizable headphone-focused 8D audio.
 
 **Developed by Gehan Fernando**
 
